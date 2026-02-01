@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -408,6 +409,33 @@ async def ingest_document(file: UploadFile = File(...)):
     LLM-enhanced processing with rule-based fallback.
     Now stores documents in PostgreSQL with vector embeddings for search.
     """
+    # Validate file type - only allow text-based files
+    ALLOWED_EXTENSIONS = {".txt", ".csv", ".json", ".md"}
+    ALLOWED_CONTENT_TYPES = {
+        "text/plain",
+        "text/csv",
+        "application/json",
+        "text/markdown",
+        "application/octet-stream",  # Generic, will check extension
+    }
+
+    file_ext = Path(file.filename).suffix.lower()
+    content_type = file.content_type or ""
+
+    # Check file extension
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file_ext}. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
+        )
+
+    # Check content type (if provided and not generic)
+    if content_type and content_type not in ALLOWED_CONTENT_TYPES and not content_type.startswith("text/"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported content type: {content_type}. Only text-based files are supported."
+        )
+
     # Upload
     content = await file.read()
     upload_result = storage.upload(file.filename, content, file.content_type)
