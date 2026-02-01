@@ -1,5 +1,5 @@
 // Use direct backend URL for development
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
 console.log('[API] API_BASE:', API_BASE);
 
 export interface HealthStatus {
@@ -150,17 +150,26 @@ export interface DocumentInfo {
 export interface DocumentListResult {
   documents: DocumentInfo[];
   total: number;
+  database_available?: boolean;
+  error?: string;
 }
 
 export async function listDocuments(limit = 100, offset = 0): Promise<DocumentListResult> {
-  const res = await fetch(`${API_BASE}/documents?limit=${limit}&offset=${offset}`);
+  const url = `${API_BASE}/documents?limit=${limit}&offset=${offset}`;
+  console.log('[API] listDocuments request:', url);
+
+  const res = await fetch(url);
+  console.log('[API] listDocuments response status:', res.status, res.statusText);
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: 'Failed to fetch documents' }));
+    console.error('[API] listDocuments error:', error);
     throw new Error(error.detail || 'Failed to fetch documents');
   }
 
-  return res.json();
+  const data = await res.json();
+  console.log('[API] listDocuments response data:', data);
+  return data;
 }
 
 export interface ChunkInfo {
@@ -182,6 +191,39 @@ export async function getDocumentDetail(documentId: number): Promise<DocumentDet
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: 'Failed to fetch document' }));
     throw new Error(error.detail || 'Failed to fetch document');
+  }
+
+  return res.json();
+}
+
+export interface DeleteDocumentResult {
+  success: boolean;
+  message: string;
+  document_id?: number;
+  file_id?: string;
+}
+
+export async function deleteDocument(documentId: number): Promise<DeleteDocumentResult> {
+  const res = await fetch(`${API_BASE}/documents/${documentId}`, {
+    method: 'DELETE',
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Failed to delete document' }));
+    throw new Error(error.detail || 'Failed to delete document');
+  }
+
+  return res.json();
+}
+
+export async function deleteFile(fileId: string): Promise<DeleteDocumentResult> {
+  const res = await fetch(`${API_BASE}/files/${fileId}`, {
+    method: 'DELETE',
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Failed to delete file' }));
+    throw new Error(error.detail || 'Failed to delete file');
   }
 
   return res.json();

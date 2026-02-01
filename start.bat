@@ -1,108 +1,140 @@
 @echo off
 setlocal enabledelayedexpansion
-
 echo ================================
-echo AIAgent起動スクリプト
+echo AIAgent Startup Script
 echo ================================
 echo.
 
-REM Docker Desktopの起動確認
-echo [0/5] Docker Desktopの起動を確認中...
-docker version >nul 2>&1
-if errorlevel 1 (
-    echo エラー: Docker Desktopが起動していません。
-    echo Docker Desktopを起動してから、再度このスクリプトを実行してください。
-    echo.
-    pause
-    exit /b 1
-)
-echo Docker Desktop: 起動確認完了
-echo.
+cd /d %~dp0
 
-REM フロントエンドの依存関係を確認
-echo [1/5] フロントエンドの依存関係を確認中...
-if not exist "frontend" (
-    echo エラー: frontendディレクトリが見つかりません。
-    pause
-    exit /b 1
-)
-cd frontend
-if not exist "node_modules" (
-    echo node_modulesが見つかりません。依存関係をインストール中...
-    call npm install
-    if errorlevel 1 (
-        echo エラー: npm installに失敗しました。
-        cd ..
-        pause
-        exit /b 1
+REM Check Docker status
+echo [0/3] Checking Docker status...
+docker info > nul 2>&1
+if !errorlevel! neq 0 (
+    echo Docker is not running. Starting Docker Desktop...
+    start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    echo Waiting for Docker to start...
+    call :wait_for_docker
+    if !errorlevel! neq 0 (
+        echo ERROR: Docker failed to start after 2 minutes.
+        echo WARNING: Continuing without PostgreSQL. Database features will be disabled.
+        goto skip_postgres
     )
-) else (
-    echo 依存関係は既にインストールされています。
 )
-cd ..
+echo Docker is running.
 echo.
 
-REM データベースとバックエンドを起動
-echo [2/5] データベースとバックエンドを起動中...
-docker-compose up -d
-if errorlevel 1 (
-    echo エラー: docker-compose upに失敗しました。
-    pause
-    exit /b 1
+REM Detect docker compose command (docker-compose vs docker compose)
+set DOCKER_COMPOSE=docker-compose
+docker-compose version > nul 2>&1
+if !errorlevel! neq 0 (
+    set DOCKER_COMPOSE=docker compose
 )
-echo Docker Composeサービス起動完了
-echo.
+echo Using: !DOCKER_COMPOSE!
 
-REM バックエンドの起動を待機
-echo [3/5] バックエンドの起動を待機中...
-echo (バックエンドのコンテナが起動し、依存関係がインストールされるまで待機します)
-timeout /t 20 /nobreak > nul
-echo.
-
-REM バックエンドのヘルスチェック
-echo [4/5] バックエンドのヘルスチェック中...
-set MAX_RETRIES=5
-set RETRY_COUNT=0
-
-:health_check_loop
-curl -s http://localhost:8000/health >nul 2>&1
-if errorlevel 1 (
-    set /a RETRY_COUNT+=1
-    if !RETRY_COUNT! lss %MAX_RETRIES% (
-        echo バックエンドがまだ起動していません... 再試行中 (!RETRY_COUNT!/%MAX_RETRIES%^)
-        timeout /t 3 /nobreak > nul
-        goto health_check_loop
-    ) else (
-        echo 警告: バックエンドのヘルスチェックに失敗しました。
-        echo バックエンドのログを確認してください: docker-compose logs backend
-        echo.
-    )
-) else (
-    echo バックエンド: 起動確認完了
+REM Start PostgreSQL via Docker Compose
+echo Starting PostgreSQL database...
+!DOCKER_COMPOSE! up -d postgres
+if !errorlevel! neq 0 (
+    echo WARNING: Failed to start PostgreSQL. Database features will be disabled.
+    goto skip_postgres
 )
+echo PostgreSQL container started.
+echo Waiting for PostgreSQL to be ready...
+call :wait_for_postgres
+echo Additional wait for PostgreSQL initialization...
+timeout /t 5 /nobreak > nul
 echo.
 
-REM フロントエンドを起動
-echo [5/5] フロントエンドを起動中...
-cd frontend
-start "AIAgent Frontend" cmd /k "npm run dev"
-cd ..
+:skip_postgres
 echo.
 
+REM Stop existing processes more aggressively
+echo Stopping existing processes...
+
+REM Kill all processes on port 8001
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8001" ^| findstr "LISTENING" 2^>nul') do (
+    echo Stopping process %%a on port 8001...
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+REM Kill all processes on port 3000
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000" ^| findstr "LISTENING" 2^>nul') do (
+    echo Stopping process %%a on port 3000...
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+REM Also kill any python processes running uvicorn
+taskkill /F /IM python.exe /FI "WINDOWTITLE eq AIAgent Backend*" >nul 2>&1
+
+REM Wait for processes to fully stop
+timeout /t 3 /nobreak > nul
+
+echo.
+echo Starting backend and frontend...
+echo.
+
+REM Start backend in a new window
+echo [1/3] Starting backend (port 8001)...
+start "AIAgent Backend" cmd /k "cd /d %~dp0backend && C:\ProgramData\miniconda3\python.exe -m uvicorn src.main:app --host 0.0.0.0 --port 8001 --reload"
+
+REM Wait for backend to start
+echo Waiting for backend to start...
+timeout /t 8 /nobreak > nul
+
+REM Start frontend in a new window
+echo [2/3] Starting frontend (port 3000)...
+start "AIAgent Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
+
+echo.
 echo ================================
-echo 起動完了！
+echo Startup Complete!
 echo ================================
 echo.
-echo フロントエンド: http://localhost:3000
-echo バックエンドAPI: http://localhost:8000
-echo API ドキュメント: http://localhost:8000/docs
-echo データベース: localhost:5432
+echo Frontend: http://localhost:3000
+echo Backend API: http://localhost:8001
+echo API Documentation: http://localhost:8001/docs
+echo PostgreSQL: localhost:5432 (aiagent database)
 echo.
-echo ログ確認コマンド:
-echo   docker-compose logs backend
-echo   docker-compose logs postgres
-echo.
-echo Ctrl+C を押してこのウィンドウを閉じてください。
-echo フロントエンドは別ウィンドウで実行されています。
+echo Each service is running in a separate window.
+echo To stop, press Ctrl+C in each window.
 echo.
 pause
+exit /b 0
+
+REM ========================================
+REM Function: Wait for Docker to start
+REM ========================================
+:wait_for_docker
+set count=0
+:wait_docker_loop
+timeout /t 5 /nobreak > nul
+docker info > nul 2>&1
+if !errorlevel! equ 0 (
+    echo Docker started successfully.
+    exit /b 0
+)
+set /a count+=1
+echo Still waiting for Docker... [!count!/24]
+if !count! lss 24 goto wait_docker_loop
+exit /b 1
+
+REM ========================================
+REM Function: Wait for PostgreSQL to be ready
+REM ========================================
+:wait_for_postgres
+set pg_count=0
+:wait_pg_loop
+docker exec aiagent-postgres pg_isready -U postgres > nul 2>&1
+if !errorlevel! equ 0 (
+    echo PostgreSQL is ready!
+    exit /b 0
+)
+set /a pg_count+=1
+echo Waiting for PostgreSQL... [!pg_count!/12]
+if !pg_count! geq 12 (
+    echo WARNING: PostgreSQL may not be fully ready. Continuing anyway...
+    exit /b 1
+)
+timeout /t 5 /nobreak > nul
+goto wait_pg_loop

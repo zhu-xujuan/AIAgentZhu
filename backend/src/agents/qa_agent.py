@@ -216,31 +216,41 @@ async def answer_question(
     Returns:
         QAResult with answer and sources.
     """
+    import time
+    start_time = time.time()
+    logger.info(f"[QA] === Starting answer_question for: '{question[:50]}...' ===")
+
     try:
         # Step 1: LLMによるクエリ拡張
         expanded_keywords = []
         if use_query_expansion:
-            logger.info("Expanding query with LLM...")
+            step_start = time.time()
+            logger.info("[QA] Step 1: Expanding query with LLM...")
             expanded_keywords = await expand_query_with_llm(question, ollama_client)
+            logger.info(f"[QA] Step 1 completed in {time.time() - step_start:.2f}s, keywords: {expanded_keywords[:5]}")
 
         # 拡張キーワードを検索クエリとして結合
         search_query = question
         if expanded_keywords:
             search_query = question + " " + " ".join(expanded_keywords)
-            logger.info(f"Expanded search query: {search_query[:100]}...")
+            logger.info(f"[QA] Expanded search query: {search_query[:100]}...")
 
         # Step 2: Generate embedding for the question
-        logger.info(f"Generating embedding for question: {question[:50]}...")
+        step_start = time.time()
+        logger.info(f"[QA] Step 2: Generating embedding for question...")
         embed_result = await ollama_client.embed(question)
+        logger.info(f"[QA] Step 2 completed in {time.time() - step_start:.2f}s, success={embed_result.success}")
 
         query_embedding = None
         if embed_result.success:
             query_embedding = embed_result.embedding
+            logger.info(f"[QA] Embedding generated, dimension: {len(query_embedding) if query_embedding else 0}")
         else:
-            logger.warning(f"Embedding generation failed: {embed_result.error}, using full-text search only")
+            logger.warning(f"[QA] Embedding generation failed: {embed_result.error}, using full-text search only")
 
         # Step 3: Search for similar chunks
-        logger.info("Searching for similar chunks...")
+        step_start = time.time()
+        logger.info("[QA] Step 3: Searching for similar chunks...")
 
         if use_hybrid_search:
             # Use hybrid search (combines vector + full-text)
@@ -268,8 +278,10 @@ async def answer_question(
 
         # Remove duplicate chunks
         search_results = deduplicate_results(search_results)
+        logger.info(f"[QA] Step 3 completed in {time.time() - step_start:.2f}s, found {len(search_results)} chunks")
 
         if not search_results:
+            logger.warning("[QA] No search results found")
             return QAResult(
                 answer="文書内に該当する情報が見つかりませんでした。関連する文書がデータベースに登録されていない可能性があります。",
                 sources=[],
@@ -277,20 +289,25 @@ async def answer_question(
                 has_answer=False,
             )
 
-        # Step 3: Format context from search results
+        # Step 4: Format context from search results
         context = format_context(search_results)
+        logger.info(f"[QA] Context formatted, length: {len(context)} chars")
 
-        # Step 4: Generate answer using LLM
-        logger.info("Generating answer with LLM...")
+        # Step 5: Generate answer using LLM
+        step_start = time.time()
+        logger.info("[QA] Step 5: Generating answer with LLM...")
         prompt = QA_PROMPT_TEMPLATE.format(context=context, question=question)
+        logger.info(f"[QA] Prompt length: {len(prompt)} chars")
 
         result = await ollama_client.generate(
             prompt=prompt,
             system=QA_SYSTEM_PROMPT,
             temperature=0.3,
         )
+        logger.info(f"[QA] Step 5 completed in {time.time() - step_start:.2f}s, success={result.success}")
 
         if not result.success:
+            logger.error(f"[QA] LLM generation failed: {result.error}")
             return QAResult(
                 answer="回答の生成に失敗しました。",
                 sources=[],
@@ -326,7 +343,8 @@ async def answer_question(
 
         confidence = round(min(1.0, base_confidence), 2)
 
-        logger.info(f"QA completed. Answer length: {len(result.text)}, Sources: {len(sources)}, Confidence: {confidence}")
+        total_time = time.time() - start_time
+        logger.info(f"[QA] === Completed in {total_time:.2f}s. Answer length: {len(result.text)}, Sources: {len(sources)}, Confidence: {confidence} ===")
 
         return QAResult(
             answer=result.text,
@@ -336,7 +354,9 @@ async def answer_question(
         )
 
     except Exception as e:
-        logger.error(f"QA error: {e}")
+        import traceback
+        logger.error(f"[QA] Error: {e}")
+        logger.error(f"[QA] Traceback: {traceback.format_exc()}")
         return QAResult(
             answer=f"エラーが発生しました: {str(e)}",
             sources=[],

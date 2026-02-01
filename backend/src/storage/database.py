@@ -89,6 +89,7 @@ class DatabaseService:
                 database=self.database,
                 user=self.user,
                 password=self.password,
+                connect_timeout=3,  # 3 second timeout
             )
         return self._conn
 

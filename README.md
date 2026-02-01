@@ -26,10 +26,16 @@ start.bat
 
 起動後、ブラウザで以下にアクセス:
 - **フロントエンド**: http://localhost:3000
-- **バックエンドAPI**: http://localhost:8000
-- **API ドキュメント**: http://localhost:8000/docs
+- **バックエンドAPI**: http://localhost:8001
+- **API ドキュメント**: http://localhost:8001/docs
 
-**停止**: `stop.bat` を実行
+### 操作スクリプト
+
+| スクリプト | 説明 |
+|-----------|------|
+| `start.bat` | PostgreSQL・バックエンド・フロントエンドを起動 |
+| `stop.bat` | すべてのサービスを停止 |
+| `reset_db.bat` | PostgreSQLデータとアップロードファイルを全削除してリセット |
 
 ---
 
@@ -93,7 +99,7 @@ start.bat
 │  │  7. Intent Router        (意図判定)                 │   │
 │  │  8. QA Agent             (質問応答)                 │   │
 │  └─────────────────────────────────────────────────────┘   │
-│  ポート: 8000                                                │
+│  ポート: 8001                                                │
 └─────────────────────────────────────────────────────────────┘
          │                                    │
          ↓ HTTPS                              ↓ SQL + Vector Search
@@ -159,8 +165,9 @@ AIAgent/
 ├── data/                   # アップロードデータ（Git除外）
 ├── docker-compose.yml      # Docker構成
 ├── setup.bat              # 初回セットアップ
-├── start.bat              # 起動スクリプト
+├── start.bat              # 起動スクリプト（PostgreSQL + Backend + Frontend）
 ├── stop.bat               # 停止スクリプト
+├── reset_db.bat           # データ全削除スクリプト（DB + アップロードファイル）
 └── README.md
 ```
 
@@ -222,7 +229,7 @@ LLM_QUALITY_GUARDIAN_ENABLED=true
 ### フロントエンド設定 (`frontend/.env.local`)
 
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_URL=http://localhost:8001
 ```
 
 ### Ollama接続について
@@ -243,8 +250,24 @@ curl https://ollama.kabu-ai.jp/
 curl https://ollama.kabu-ai.jp/api/tags
 
 # バックエンドのヘルスチェック
-curl http://localhost:8000/health
+curl http://localhost:8001/health
 ```
+
+---
+
+## 🔄 データのリセット
+
+すべてのデータ（PostgreSQLデータベース + アップロードファイル）を削除してやり直す場合:
+
+```bash
+reset_db.bat
+```
+
+このスクリプトは以下を実行します:
+1. PostgreSQLが起動しているか確認（起動していなければ起動）
+2. アップロードファイルを削除（`data/uploads/`）
+3. PostgreSQLのデータを削除（docker volume）
+4. PostgreSQLを新規作成して再起動
 
 ---
 
@@ -280,7 +303,7 @@ docker exec -it aiagent-postgres psql -U postgres -d aiagent
 curl https://ollama.kabu-ai.jp/
 
 # バックエンドのヘルスチェック（Ollama接続状態も表示）
-curl http://localhost:8000/health
+curl http://localhost:8001/health
 ```
 
 ### フロントエンドが起動しない
@@ -319,7 +342,7 @@ venv\Scripts\activate
 pip install -r requirements.txt
 
 # サーバー起動
-uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn src.main:app --reload --host 0.0.0.0 --port 8001
 ```
 
 **注意**: ローカル開発時は `backend/.env` の `POSTGRES_HOST=localhost` に変更してください。

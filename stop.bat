@@ -1,34 +1,47 @@
 @echo off
+setlocal enabledelayedexpansion
 echo ================================
-echo AIAgent停止スクリプト
+echo AIAgent Stop Script
 echo ================================
 echo.
 
-REM Docker Composeサービスを停止
-echo データベースとバックエンドを停止中...
-docker-compose down
-if errorlevel 1 (
-    echo 警告: docker-compose downでエラーが発生しました。
-    echo コンテナが既に停止している可能性があります。
-) else (
-    echo Docker Composeサービス停止完了
+echo Stopping all processes...
+echo.
+
+REM Detect docker compose command (docker-compose vs docker compose)
+set DOCKER_COMPOSE=docker-compose
+docker-compose version > nul 2>&1
+if !errorlevel! neq 0 (
+    set DOCKER_COMPOSE=docker compose
 )
+
+REM Stop PostgreSQL via Docker Compose
+echo Stopping PostgreSQL database...
+!DOCKER_COMPOSE! down
 echo.
 
-REM コンテナの状態を確認
-echo 現在のコンテナ状態:
-docker-compose ps
-echo.
+REM Kill all processes on port 8001 (Backend)
+echo Stopping backend (port 8001)...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8001" ^| findstr "LISTENING"') do (
+    echo   Killing PID %%a
+    taskkill /F /PID %%a >nul 2>&1
+)
 
+REM Kill all processes on port 3000 (Frontend)
+echo Stopping frontend (port 3000)...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000" ^| findstr "LISTENING"') do (
+    echo   Killing PID %%a
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+REM Kill any remaining node processes for frontend
+taskkill /F /IM node.exe /FI "WINDOWTITLE eq AIAgent Frontend*" >nul 2>&1
+
+echo.
 echo ================================
-echo 停止完了！
+echo All services stopped!
 echo ================================
 echo.
-echo フロントエンドは手動で停止してください:
-echo   1. フロントエンドのウィンドウ (AIAgent Frontend) でCtrl+Cを押す
-echo   2. またはウィンドウを閉じる
-echo.
-echo コンテナを完全に削除する場合:
-echo   docker-compose down -v
+echo To restart: run start.bat
 echo.
 pause

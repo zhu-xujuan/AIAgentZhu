@@ -318,13 +318,40 @@ class LocalStorage:
         Returns:
             List of FileMetadata objects
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.info(f"[LocalStorage.list_files] Called with limit={limit}, offset={offset}")
+        logger.info(f"[LocalStorage.list_files] metadata_dir={self.metadata_dir}")
+        logger.info(f"[LocalStorage.list_files] metadata_dir exists={self.metadata_dir.exists()}")
+
         files = []
 
-        for date_dir in sorted(self.metadata_dir.iterdir(), reverse=True):
+        if not self.metadata_dir.exists():
+            logger.error(f"[LocalStorage.list_files] metadata_dir does not exist!")
+            return files
+
+        try:
+            date_dirs = list(sorted(self.metadata_dir.iterdir(), reverse=True))
+            logger.info(f"[LocalStorage.list_files] Found {len(date_dirs)} date directories")
+        except Exception as e:
+            logger.error(f"[LocalStorage.list_files] Error listing date dirs: {e}")
+            return files
+
+        for date_dir in date_dirs:
             if not date_dir.is_dir():
                 continue
 
-            for meta_file in sorted(date_dir.iterdir(), reverse=True):
+            logger.info(f"[LocalStorage.list_files] Processing date_dir: {date_dir.name}")
+
+            try:
+                meta_files = list(sorted(date_dir.iterdir(), reverse=True))
+                logger.info(f"[LocalStorage.list_files] Found {len(meta_files)} files in {date_dir.name}")
+            except Exception as e:
+                logger.error(f"[LocalStorage.list_files] Error listing meta files: {e}")
+                continue
+
+            for meta_file in meta_files:
                 if not meta_file.suffix == '.json':
                     continue
 
@@ -333,15 +360,18 @@ class LocalStorage:
                     continue
 
                 if len(files) >= limit:
+                    logger.info(f"[LocalStorage.list_files] Reached limit, returning {len(files)} files")
                     return files
 
                 try:
                     with open(meta_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                     files.append(FileMetadata(**data))
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"[LocalStorage.list_files] Failed to parse {meta_file}: {e}")
                     continue
 
+        logger.info(f"[LocalStorage.list_files] Returning {len(files)} files")
         return files
 
     def exists(self, file_id: str) -> bool:

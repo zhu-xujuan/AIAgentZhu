@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { listDocuments, DocumentInfo } from '@/lib/api';
+import { listDocuments, DocumentInfo, deleteDocument, deleteFile } from '@/lib/api';
 import DocumentDetailModal from './DocumentDetailModal';
 
 function getFileIcon(fileName: string, fileType: string | null) {
@@ -111,17 +111,65 @@ export default function FileList({ refreshTrigger }: FileListProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [databaseAvailable, setDatabaseAvailable] = useState(true);
 
   const fetchDocuments = async () => {
+    console.log('[FileList] fetchDocuments called, refreshTrigger:', refreshTrigger);
     try {
       setLoading(true);
-      const result = await listDocuments();
-      setDocuments(result.documents);
       setError(null);
+      console.log('[FileList] Calling listDocuments API...');
+      const result = await listDocuments();
+      console.log('[FileList] API Response:', {
+        documentsCount: result.documents?.length,
+        total: result.total,
+        databaseAvailable: result.database_available,
+        error: result.error,
+        documents: result.documents
+      });
+      setDocuments(result.documents);
+      setDatabaseAvailable(result.database_available !== false);
+
+      // Show info message if database is not available
+      if ('database_available' in result && !result.database_available) {
+        console.info('[FileList] Database is not available. Showing files from storage.');
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load documents');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to load documents';
+      console.error('[FileList] Error fetching documents:', err);
+      setError(errorMessage);
+      setDocuments([]); // Clear documents on error
     } finally {
       setLoading(false);
+      console.log('[FileList] fetchDocuments completed');
+    }
+  };
+
+  const handleDelete = async (e: React.MouseEvent, documentId: number, fileId: string) => {
+    e.stopPropagation(); // Prevent opening the detail modal
+
+    if (!confirm('このドキュメントを削除してもよろしいですか？')) {
+      return;
+    }
+
+    try {
+      setDeletingId(documentId);
+
+      // Use file_id for deletion when database is not available
+      if (!databaseAvailable) {
+        await deleteFile(fileId);
+      } else {
+        await deleteDocument(documentId);
+      }
+
+      // Remove from local state immediately
+      setDocuments(docs => docs.filter(doc => doc.id !== documentId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete document');
+      console.error('Delete failed:', err);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -180,7 +228,7 @@ export default function FileList({ refreshTrigger }: FileListProps) {
           <div
             key={doc.id}
             onClick={() => setSelectedDocumentId(doc.id)}
-            className="flex items-center gap-4 p-3 bg-white border rounded-lg hover:bg-gray-50 hover:border-blue-300 transition-colors cursor-pointer"
+            className="flex items-center gap-4 p-3 bg-white border rounded-lg hover:bg-gray-50 hover:border-blue-300 transition-colors cursor-pointer relative group"
           >
             <div className="flex-shrink-0">
               {getFileIcon(doc.file_name, doc.file_type)}
@@ -203,6 +251,20 @@ export default function FileList({ refreshTrigger }: FileListProps) {
                 </span>
               </div>
             )}
+            <button
+              onClick={(e) => handleDelete(e, doc.id, doc.file_id)}
+              disabled={deletingId === doc.id}
+              className="flex-shrink-0 p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+              title="削除"
+            >
+              {deletingId === doc.id ? (
+                <div className="animate-spin h-5 w-5 border-2 border-gray-300 border-t-red-600 rounded-full"></div>
+              ) : (
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              )}
+            </button>
           </div>
         ))}
       </div>

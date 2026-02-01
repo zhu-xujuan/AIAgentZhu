@@ -140,7 +140,7 @@ async def classify_intent_llm(question: str, ollama_client) -> IntentResult:
     """
     try:
         prompt = INTENT_CLASSIFICATION_PROMPT.format(question=question)
-        result = await ollama_client.generate(prompt, max_tokens=20)
+        result = await ollama_client.generate(prompt, temperature=0.1)
 
         intent_str = result.text.strip().lower().replace('"', '').replace("'", "")
 

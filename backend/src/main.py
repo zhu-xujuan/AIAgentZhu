@@ -22,6 +22,7 @@ load_dotenv()
 
 from src.storage.local_storage import LocalStorage
 from src.storage.database import DatabaseService, get_database_service
+from src.storage.pdf_parser import extract_text_from_pdf, is_valid_pdf
 from src.agents.document_classifier import classify_document, classify_document_async
 from src.agents.chunking_agent import chunk_document
 from src.agents.fact_extractor import extract_facts, extract_facts_async
@@ -80,10 +81,13 @@ async def lifespan(app: FastAPI):
     # Initialize database service
     try:
         db_service = get_database_service()
-        stats = db_service.get_stats()
-        logger.info(f"Database connected. Stats: {stats}")
+        if db_service:
+            stats = db_service.get_stats()
+            logger.info(f"Database connected. Stats: {stats}")
+        else:
+            logger.warning("Database service not available. QA features will be disabled.")
     except Exception as e:
-        logger.warning(f"Database not available: {e}. QA features will be disabled.")
+        logger.warning(f"Failed to connect to database: {e}. QA features will be disabled.")
         db_service = None
 
     yield
@@ -113,8 +117,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Storage instance
-storage = LocalStorage("./data/uploads")
+# Storage instance - use project root data directory
+storage = LocalStorage("../data/uploads")
+logger.info(f"[STARTUP] Storage initialized: base_path={storage.base_path}, metadata_dir={storage.metadata_dir}")
 
 
 # ============================================================
@@ -151,8 +156,102 @@ class FormatRequest(BaseModel):
 
 
 # ============================================================
-# Health Check
+# Health Check & Debug
 # ============================================================
+
+@app.get("/debug/database")
+async def debug_database():
+    """Debug endpoint to test database connection."""
+    import psycopg2
+    result = {
+        "db_service_exists": db_service is not None,
+        "env_host": os.getenv("POSTGRES_HOST", "not set"),
+        "env_port": os.getenv("POSTGRES_PORT", "not set"),
+        "env_db": os.getenv("POSTGRES_DB", "not set"),
+        "env_user": os.getenv("POSTGRES_USER", "not set"),
+        "direct_connection": None,
+        "db_service_connection": None,
+    }
+
+    # Test direct connection
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            database=os.getenv("POSTGRES_DB", "aiagent"),
+            user=os.getenv("POSTGRES_USER", "postgres"),
+            password=os.getenv("POSTGRES_PASSWORD", "aiagent123"),
+            connect_timeout=3,
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        conn.close()
+        result["direct_connection"] = "success"
+    except Exception as e:
+        result["direct_connection"] = f"failed: {str(e)}"
+
+    # Test via db_service
+    if db_service:
+        try:
+            stats = db_service.get_stats()
+            result["db_service_connection"] = f"success: {stats}"
+        except Exception as e:
+            result["db_service_connection"] = f"failed: {str(e)}"
+    else:
+        result["db_service_connection"] = "db_service is None"
+
+    return result
+
+
+@app.get("/debug/storage")
+async def debug_storage():
+    """Debug endpoint to check storage status."""
+    import os
+    try:
+        base_path = str(storage.base_path)
+        files_dir = str(storage.files_dir)
+        metadata_dir = str(storage.metadata_dir)
+        cwd = os.getcwd()
+
+        # Check if directories exist
+        base_exists = storage.base_path.exists()
+        files_exists = storage.files_dir.exists()
+        metadata_exists = storage.metadata_dir.exists()
+
+        # List metadata files
+        metadata_files = []
+        if metadata_exists:
+            for date_dir in storage.metadata_dir.iterdir():
+                if date_dir.is_dir():
+                    for f in date_dir.iterdir():
+                        if f.suffix == '.json':
+                            metadata_files.append(str(f.name))
+
+        # Try to list files
+        files = []
+        try:
+            file_list = storage.list_files(limit=20)
+            files = [{"name": f.original_name, "id": f.file_id} for f in file_list]
+        except Exception as e:
+            files = [{"error": str(e)}]
+
+        return {
+            "cwd": cwd,
+            "base_path": base_path,
+            "base_exists": base_exists,
+            "files_dir": files_dir,
+            "files_exists": files_exists,
+            "metadata_dir": metadata_dir,
+            "metadata_exists": metadata_exists,
+            "metadata_file_count": len(metadata_files),
+            "metadata_files_sample": metadata_files[:5],
+            "files_from_list": files,
+            "files_count": len(files),
+        }
+    except Exception as e:
+        logger.error(f"Debug storage error: {e}", exc_info=True)
+        return {"error": str(e)}
+
 
 @app.get("/health")
 async def health_check():
@@ -231,32 +330,99 @@ async def list_documents(limit: int = 100, offset: int = 0):
     """
     Get list of all uploaded documents.
     Returns document metadata including file type and classification.
+    Falls back to storage-based list when database is not available.
     """
     if not db_service:
-        raise HTTPException(
-            status_code=503,
-            detail="Database service is not available"
-        )
-
-    documents = db_service.get_all_documents(limit=limit, offset=offset)
-
-    return {
-        "documents": [
-            {
-                "id": doc.id,
-                "file_id": doc.file_id,
-                "file_name": doc.file_name,
-                "file_type": doc.file_type,
-                "doc_type": doc.doc_type,
-                "language": doc.language,
-                "owner_company": doc.owner_company,
-                "doc_date": str(doc.doc_date) if doc.doc_date else None,
-                "confidence": doc.confidence,
+        # When database is not available, return files from storage
+        logger.info(f"Database not available, returning files from storage (base_path: {storage.base_path})")
+        try:
+            files = storage.list_files(limit=limit, offset=offset)
+            logger.info(f"Found {len(files)} files in storage")
+            return {
+                "documents": [
+                    {
+                        "id": idx,  # Use index as temporary ID
+                        "file_id": file.file_id,
+                        "file_name": file.original_name,
+                        "file_type": file.file_type,
+                        "doc_type": None,  # Not available without database
+                        "language": None,
+                        "owner_company": None,
+                        "doc_date": None,
+                        "confidence": None,
+                        "upload_time": file.upload_time,
+                        "size_bytes": file.size_bytes,
+                    }
+                    for idx, file in enumerate(files)
+                ],
+                "total": len(files),
+                "database_available": False,
             }
-            for doc in documents
-        ],
-        "total": len(documents),
-    }
+        except Exception as e:
+            logger.error(f"Failed to fetch files from storage: {e}", exc_info=True)
+            return {
+                "documents": [],
+                "total": 0,
+                "database_available": False,
+                "error": str(e),
+            }
+
+    try:
+        documents = db_service.get_all_documents(limit=limit, offset=offset)
+
+        return {
+            "documents": [
+                {
+                    "id": doc.id,
+                    "file_id": doc.file_id,
+                    "file_name": doc.file_name,
+                    "file_type": doc.file_type,
+                    "doc_type": doc.doc_type,
+                    "language": doc.language,
+                    "owner_company": doc.owner_company,
+                    "doc_date": str(doc.doc_date) if doc.doc_date else None,
+                    "confidence": doc.confidence,
+                }
+                for doc in documents
+            ],
+            "total": len(documents),
+            "database_available": True,
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch documents from database: {e}")
+        # Fallback to storage
+        logger.info("Falling back to storage-based file list")
+        try:
+            files = storage.list_files(limit=limit, offset=offset)
+            return {
+                "documents": [
+                    {
+                        "id": idx,
+                        "file_id": file.file_id,
+                        "file_name": file.original_name,
+                        "file_type": file.file_type,
+                        "doc_type": None,
+                        "language": None,
+                        "owner_company": None,
+                        "doc_date": None,
+                        "confidence": None,
+                        "upload_time": file.upload_time,
+                        "size_bytes": file.size_bytes,
+                    }
+                    for idx, file in enumerate(files)
+                ],
+                "total": len(files),
+                "database_available": False,
+                "error": str(e),
+            }
+        except Exception as storage_error:
+            logger.error(f"Storage fallback also failed: {storage_error}")
+            return {
+                "documents": [],
+                "total": 0,
+                "database_available": False,
+                "error": f"Database error: {str(e)}, Storage error: {str(storage_error)}",
+            }
 
 
 @app.get("/documents/{document_id}")
@@ -299,6 +465,106 @@ async def get_document_detail(document_id: int):
         ],
         "total_chunks": len(chunks),
     }
+
+
+@app.delete("/files/{file_id}")
+async def delete_file_by_id(file_id: str):
+    """
+    Delete a file from storage and database (if available).
+    Works even when database is disabled.
+
+    Args:
+        file_id: File identifier from storage
+
+    Returns:
+        Success status and message
+    """
+    try:
+        # Delete from database if available
+        db_deleted = False
+        doc_name = None
+
+        if db_service:
+            try:
+                doc = db_service.get_document_by_file_id(file_id)
+                if doc:
+                    doc_name = doc.file_name
+                    db_deleted = db_service.delete_document(file_id)
+                    logger.info(f"Deleted from database: {file_id}")
+            except Exception as e:
+                logger.warning(f"Failed to delete from database: {e}")
+
+        # Delete from storage
+        storage_deleted = storage.delete(file_id)
+
+        if not storage_deleted and not db_deleted:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        message = f"File '{doc_name or file_id}' deleted successfully"
+        if db_deleted and storage_deleted:
+            message += " (from both database and storage)"
+        elif db_deleted:
+            message += " (from database only)"
+        elif storage_deleted:
+            message += " (from storage only)"
+
+        logger.info(f"Deleted file: {file_id}")
+        return {
+            "success": True,
+            "message": message,
+            "file_id": file_id,
+            "deleted_from_database": db_deleted,
+            "deleted_from_storage": storage_deleted
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/documents/{document_id}")
+async def delete_document(document_id: int):
+    """
+    Delete a document and all related data (chunks, embeddings).
+    Returns success status.
+    """
+    if not db_service:
+        raise HTTPException(
+            status_code=503,
+            detail="Database service is not available"
+        )
+
+    # Get document to verify it exists and get file_id
+    doc = db_service.get_document_by_id(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Delete from database
+    try:
+        deleted = db_service.delete_document(doc.file_id)
+        if not deleted:
+            raise HTTPException(status_code=500, detail="Failed to delete document")
+
+        # Delete file from storage using file_id
+        storage_deleted = storage.delete(doc.file_id)
+        if storage_deleted:
+            logger.info(f"Deleted file from storage: {doc.file_id}")
+        else:
+            logger.warning(f"File not found in storage: {doc.file_id}")
+
+        logger.info(f"Deleted document {document_id} ({doc.file_name})")
+        return {
+            "success": True,
+            "message": f"Document '{doc.file_name}' deleted successfully",
+            "document_id": document_id,
+            "deleted_from_storage": storage_deleted
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to delete document {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================
@@ -409,13 +675,18 @@ async def ingest_document(file: UploadFile = File(...)):
     LLM-enhanced processing with rule-based fallback.
     Now stores documents in PostgreSQL with vector embeddings for search.
     """
-    # Validate file type - only allow text-based files
-    ALLOWED_EXTENSIONS = {".txt", ".csv", ".json", ".md"}
+    import time
+    start_time = time.time()
+    logger.info(f"[INGEST] Starting ingestion for file: {file.filename}")
+
+    # Validate file type - allow text-based files and PDFs
+    ALLOWED_EXTENSIONS = {".txt", ".csv", ".json", ".md", ".pdf"}
     ALLOWED_CONTENT_TYPES = {
         "text/plain",
         "text/csv",
         "application/json",
         "text/markdown",
+        "application/pdf",
         "application/octet-stream",  # Generic, will check extension
     }
 
@@ -437,8 +708,13 @@ async def ingest_document(file: UploadFile = File(...)):
         )
 
     # Upload
+    step_start = time.time()
     content = await file.read()
+    logger.info(f"[INGEST] File read: {len(content)} bytes, took {time.time() - step_start:.2f}s")
+
+    step_start = time.time()
     upload_result = storage.upload(file.filename, content, file.content_type)
+    logger.info(f"[INGEST] Upload completed, took {time.time() - step_start:.2f}s")
 
     if not upload_result.success:
         raise HTTPException(status_code=500, detail=upload_result.message)
@@ -469,14 +745,36 @@ async def ingest_document(file: UploadFile = File(...)):
             "stored_in_db": existing_doc is not None,
         }
 
-    # Read text (simplified - in production, use proper parser)
-    try:
-        raw_text = content.decode('utf-8')
-    except UnicodeDecodeError:
-        raw_text = ""
+    # Read text - handle PDF and text files
+    raw_text = ""
+    pages = []
+
+    if file_ext == ".pdf":
+        # Extract text from PDF
+        try:
+            pages = extract_text_from_pdf(content)
+            # Combine all page texts for classification
+            raw_text = "\n\n".join([p["text"] for p in pages])
+            logger.info(f"Extracted {len(pages)} pages from PDF")
+        except Exception as e:
+            logger.error(f"Failed to extract PDF text: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to extract text from PDF: {str(e)}"
+            )
+    else:
+        # Extract text from text-based files
+        try:
+            raw_text = content.decode('utf-8')
+            pages = [{"page": 1, "text": raw_text}]
+        except UnicodeDecodeError:
+            raw_text = ""
+            pages = [{"page": 1, "text": ""}]
 
     # Step 1: Classify (LLM-enhanced)
+    step_start = time.time()
     use_llm_classify = _should_use_llm("document_classifier")
+    logger.info(f"[INGEST] Step 1: Starting classification (use_llm={use_llm_classify})")
     classification = await classify_document_async(
         file.filename,
         file.content_type or "",
@@ -484,16 +782,20 @@ async def ingest_document(file: UploadFile = File(...)):
         ollama_client=ollama_client if use_llm_classify else None,
         use_llm=use_llm_classify,
     )
+    logger.info(f"[INGEST] Step 1 completed: doc_type={classification.get('doc_type')}, took {time.time() - step_start:.2f}s")
 
-    # Step 2: Chunk (rule-based only) - use full text
-    pages = [{"page": 1, "text": raw_text}]
+    # Step 2: Chunk (rule-based only) - use extracted pages
+    step_start = time.time()
+    logger.info(f"[INGEST] Step 2: Starting chunking")
     chunks = chunk_document(pages)
+    logger.info(f"[INGEST] Step 2 completed: {len(chunks['chunks'])} chunks, took {time.time() - step_start:.2f}s")
 
     # Step 3: Generate embeddings for chunks (parallel processing)
+    step_start = time.time()
     embeddings = []
     if ollama_client and db_service:
         chunk_texts = [chunk["text"] for chunk in chunks["chunks"]]
-        logger.info(f"Generating embeddings for {len(chunk_texts)} chunks (parallel, max_concurrent={ollama_client.max_concurrent_embeddings})...")
+        logger.info(f"[INGEST] Step 3: Generating embeddings for {len(chunk_texts)} chunks (parallel, max_concurrent={ollama_client.max_concurrent_embeddings})...")
 
         embed_results = await ollama_client.embed_batch(chunk_texts)
 
@@ -503,11 +805,16 @@ async def ingest_document(file: UploadFile = File(...)):
             else:
                 embeddings.append(None)
                 logger.warning(f"Failed to embed chunk {chunks['chunks'][i]['chunk_index']}: {embed_result.error}")
+        logger.info(f"[INGEST] Step 3 completed: {len([e for e in embeddings if e])}/{len(embeddings)} embeddings, took {time.time() - step_start:.2f}s")
+    else:
+        logger.info(f"[INGEST] Step 3 skipped: LLM or DB not available")
 
     # Step 4: Save to database
+    step_start = time.time()
     doc_id = None
     is_duplicate = False
     if db_service:
+        logger.info(f"[INGEST] Step 4: Saving to database")
         try:
             # Get checksum from upload result
             checksum = upload_result.metadata.checksum if upload_result.metadata else None
@@ -527,7 +834,7 @@ async def ingest_document(file: UploadFile = File(...)):
             )
 
             if is_duplicate:
-                logger.info(f"Duplicate document detected: {file.filename} (existing doc_id={doc_id})")
+                logger.info(f"[INGEST] Duplicate document detected: {file.filename} (existing doc_id={doc_id})")
             else:
                 # Save chunks with embeddings (only for new documents)
                 chunk_data = [
@@ -545,35 +852,70 @@ async def ingest_document(file: UploadFile = File(...)):
                     chunks=chunk_data,
                     embeddings=embeddings if embeddings else None,
                 )
-                logger.info(f"Saved document {file.filename} with {len(chunks['chunks'])} chunks to database")
+                logger.info(f"[INGEST] Step 4 completed: Saved document {file.filename} with {len(chunks['chunks'])} chunks, took {time.time() - step_start:.2f}s")
 
         except Exception as e:
-            logger.error(f"Failed to save to database: {e}")
+            logger.error(f"[INGEST] Step 4 failed: {e}")
             # Continue without database - still return results
+    else:
+        logger.info(f"[INGEST] Step 4 skipped: Database not available")
 
-    # Step 5: Extract (LLM-enhanced)
+    # Step 5: Extract (LLM-enhanced) - with timeout
+    step_start = time.time()
     chunks_for_extraction = [
         {"text": c["text"], "page": c["page"], "index": c["chunk_index"]}
         for c in chunks["chunks"]
     ]
     use_llm_extract = _should_use_llm("fact_extractor")
-    facts = await extract_facts_async(
-        classification["doc_type"],
-        chunks_for_extraction,
-        ollama_client=ollama_client if use_llm_extract else None,
-        use_llm=use_llm_extract,
-        language=classification.get("language", "ja"),
-    )
+    logger.info(f"[INGEST] Step 5: Starting fact extraction (use_llm={use_llm_extract}, chunks={len(chunks_for_extraction)})")
 
-    # Step 6: Quality Check (LLM-enhanced)
+    # Set timeout for fact extraction (30 seconds max)
+    import asyncio
+    try:
+        facts = await asyncio.wait_for(
+            extract_facts_async(
+                classification["doc_type"],
+                chunks_for_extraction,
+                ollama_client=ollama_client if use_llm_extract else None,
+                use_llm=use_llm_extract,
+                language=classification.get("language", "ja"),
+            ),
+            timeout=30.0  # 30 second timeout for entire extraction
+        )
+        logger.info(f"[INGEST] Step 5 completed: {len(facts['facts'])} facts extracted, took {time.time() - step_start:.2f}s")
+    except asyncio.TimeoutError:
+        logger.warning(f"[INGEST] Step 5 timeout: Fact extraction took too long (>30s), using empty facts")
+        facts = {"facts": [], "llm_used": False}
+    except Exception as e:
+        logger.error(f"[INGEST] Step 5 failed: {e}")
+        facts = {"facts": [], "llm_used": False}
+
+    # Step 6: Quality Check (LLM-enhanced) - with timeout
+    step_start = time.time()
     use_llm_quality = _should_use_llm("quality_guardian")
-    quality = await check_quality_async(
-        facts["facts"],
-        {"ocr_used": False, "chunk_count": len(chunks["chunks"])},
-        ollama_client=ollama_client if use_llm_quality else None,
-        use_llm=use_llm_quality,
-        doc_type=classification["doc_type"],
-    )
+    logger.info(f"[INGEST] Step 6: Starting quality check (use_llm={use_llm_quality})")
+
+    try:
+        quality = await asyncio.wait_for(
+            check_quality_async(
+                facts["facts"],
+                {"ocr_used": False, "chunk_count": len(chunks["chunks"])},
+                ollama_client=ollama_client if use_llm_quality else None,
+                use_llm=use_llm_quality,
+                doc_type=classification["doc_type"],
+            ),
+            timeout=15.0  # 15 second timeout for quality check
+        )
+        logger.info(f"[INGEST] Step 6 completed: took {time.time() - step_start:.2f}s")
+    except asyncio.TimeoutError:
+        logger.warning(f"[INGEST] Step 6 timeout: Quality check took too long (>15s), using basic quality")
+        quality = {"needs_review": False, "reasons": []}
+    except Exception as e:
+        logger.error(f"[INGEST] Step 6 failed: {e}")
+        quality = {"needs_review": False, "reasons": []}
+
+    total_time = time.time() - start_time
+    logger.info(f"[INGEST] Ingestion completed for {file.filename}: total_time={total_time:.2f}s, chunks={len(chunks['chunks'])}, facts={len(facts['facts'])}")
 
     return {
         "file_id": upload_result.file_id,
@@ -586,7 +928,33 @@ async def ingest_document(file: UploadFile = File(...)):
         "quality": quality,
         "llm_used": any([use_llm_classify, use_llm_extract, use_llm_quality]),
         "stored_in_db": doc_id is not None,
+        "processing_time_seconds": round(total_time, 2),
     }
+
+
+def _try_reconnect_database() -> bool:
+    """Try to reconnect to database if not connected."""
+    global db_service
+
+    # If already connected, verify it still works
+    if db_service:
+        try:
+            db_service.get_stats()
+            return True
+        except Exception:
+            logger.warning("Existing database connection failed, attempting reconnect...")
+            db_service = None
+
+    # Create new connection
+    try:
+        db_service = DatabaseService()  # Create new instance directly
+        stats = db_service.get_stats()
+        logger.info(f"Database reconnected successfully. Stats: {stats}")
+        return True
+    except Exception as e:
+        logger.warning(f"Database reconnection failed: {e}")
+        db_service = None
+    return False
 
 
 @app.post("/pipeline/query")
@@ -599,21 +967,32 @@ async def query_documents(request: QueryRequest):
        - file_stats: Return statistics
        - search_content/general_qa: Use RAG (Vector Search → LLM)
     """
-    # Check if database is available
-    if not db_service:
+    import time
+    query_start = time.time()
+    logger.info(f"[QUERY] === Starting query: '{request.question[:50]}...' ===")
+
+    # Try to reconnect to database if not connected
+    if not _try_reconnect_database():
+        logger.error("[QUERY] Database reconnection failed")
         raise HTTPException(
             status_code=503,
             detail="Database service is not available. Please check PostgreSQL connection."
         )
+    logger.info(f"[QUERY] Database connected, elapsed: {time.time() - query_start:.2f}s")
 
     try:
         # Create Intent Router
         router = IntentRouter(db_service=db_service, ollama_client=ollama_client)
+        logger.info(f"[QUERY] IntentRouter created, ollama_client={ollama_client is not None}")
 
         # Define QA handler for RAG-based queries
         async def qa_handler(question: str):
             """RAG handler using existing QA Agent"""
+            qa_start = time.time()
+            logger.info(f"[QUERY] QA handler called for: '{question[:50]}...'")
+
             if not ollama_client:
+                logger.error("[QUERY] ollama_client is None")
                 from src.agents.intent_router import RouterResponse
                 return RouterResponse(
                     question=question,
@@ -626,6 +1005,7 @@ async def query_documents(request: QueryRequest):
                     error="LLM service not available"
                 )
 
+            logger.info(f"[QUERY] Calling answer_question...")
             result = await answer_question(
                 question=question,
                 ollama_client=ollama_client,
@@ -634,6 +1014,8 @@ async def query_documents(request: QueryRequest):
                 similarity_threshold=0.3,
                 use_hybrid_search=True,
             )
+            logger.info(f"[QUERY] answer_question completed in {time.time() - qa_start:.2f}s")
+            logger.info(f"[QUERY] Result: has_answer={result.has_answer}, confidence={result.confidence}, error={result.error}")
 
             from src.agents.intent_router import RouterResponse
             return RouterResponse(
