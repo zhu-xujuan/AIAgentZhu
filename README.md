@@ -1,148 +1,222 @@
 # AIAgent - Multi-Agent RAG System
 
-LLM強化型のマルチエージェントRAG（Retrieval-Augmented Generation）システムです。ドキュメントの取り込みから質問応答まで、AIエージェントがインテリジェントに処理します。
+LLM強化型のマルチエージェントRAG（Retrieval-Augmented Generation）システムです。ドキュメントを自動分類・構造化し、自然言語で質問応答ができます。
 
-## 主な機能
+---
 
-- **ドキュメント取り込み**: 契約書、議事録、請求書などの自動分類と構造化
-- **ベクトル検索**: PostgreSQL + pgvectorによる高速な類似度検索
-- **質問応答**: Ollamaを使ったLLM強化型のインテリジェントな回答生成
-- **マルチエージェント処理**: 各タスクに特化したAIエージェントによる協調処理
-- **外部LLMアクセス**: Cloudflare Tunnel経由で安全にOllamaサーバーにアクセス
+## 🚀 とりあえず動かす（3ステップ）
 
-## セットアップ済み項目
+### 必要な環境
+- **Docker Desktop** (Windows)
+- **Node.js 18以上**
 
-このリポジトリには、すぐに起動できるように以下が設定済みです:
-
-### ✅ 環境設定ファイル
-- `backend/.env` - バックエンドの環境変数（Ollama接続設定含む）
-- `frontend/.env.local` - フロントエンドの環境変数
-
-### ✅ Docker環境
-- `docker-compose.yml` - PostgreSQL（pgvector）+ バックエンドAPI
-- `backend/Dockerfile` - FastAPIバックエンドのコンテナイメージ
-- データベース初期化スクリプト（`config/database/init.sql`）
-
-### ✅ 起動スクリプト
-- `setup.bat` - 初回セットアップ（依存関係インストール、環境確認）
-- `start.bat` - ワンクリック起動（DB、バックエンド、フロントエンド）
-- `stop.bat` - アプリケーション停止
-
-### ✅ Ollama設定
-- **接続先**: `https://ollama.kabu-ai.jp` （Cloudflare Tunnel経由）
-- **モデル**: `gemma3:4b` （gemma3シリーズの4Bパラメータモデル）
-- **埋め込みモデル**: `nomic-embed-text` （ベクトル検索用）
-
-## アーキテクチャ
-
-- **フロントエンド**: Next.js 15 + React 19 + TypeScript + Tailwind CSS
-- **バックエンド**: FastAPI + Python 3.11
-- **データベース**: PostgreSQL 16 + pgvector
-- **LLM**: Ollama (外部アクセス: `https://ollama.kabu-ai.jp`)
-
-## 必要な環境
-
-- Docker Desktop (Windows)
-- Node.js 18以上
-- Python 3.11以上 (ローカル開発時)
-- Ollama (外部ドメインで稼働中: `ollama.kabu-ai.jp`)
-
-## クイックスタート
-
-### 1. リポジトリのクローン
+### 起動手順
 
 ```bash
-git clone <repository-url>
+# 1. リポジトリをクローン
+git clone https://github.com/FGjp-techdes/AIAgent.git
 cd AIAgent
-```
 
-### 2. 初期セットアップ（初回のみ）
-
-Windowsの場合、セットアップスクリプトを実行:
-
-```bash
+# 2. 初回セットアップ（初回のみ）
 setup.bat
-```
 
-このスクリプトは以下を自動的に実行します:
-1. フロントエンドの依存関係をインストール（npm install）
-2. 環境設定ファイルの確認（.envファイル）
-3. Dockerイメージのビルド
-
-### 3. 起動
-
-Windowsの場合、起動スクリプトを実行:
-
-```bash
+# 3. 起動
 start.bat
 ```
 
-このスクリプトは以下を自動的に実行します:
-1. PostgreSQLデータベースを起動（Docker）
-2. バックエンドAPIを起動（Docker）
-3. フロントエンド開発サーバーを起動（別ウィンドウ）
-
-### 4. アクセス
-
-起動完了後、以下のURLにアクセスできます:
-
+起動後、ブラウザで以下にアクセス:
 - **フロントエンド**: http://localhost:3000
 - **バックエンドAPI**: http://localhost:8000
 - **API ドキュメント**: http://localhost:8000/docs
 
-## 手動起動（開発者向け）
+**停止**: `stop.bat` を実行
 
-### データベースのみ起動
+---
 
-```bash
-docker-compose up -d postgres
+## 📚 技術スタック
+
+### フロントエンド
+- **Next.js 15** - React フレームワーク (App Router)
+- **React 19** - UIライブラリ
+- **TypeScript** - 型安全な開発
+- **Tailwind CSS** - ユーティリティファーストCSS
+
+### バックエンド
+- **FastAPI** - 高速なPython Webフレームワーク
+- **Python 3.11** - プログラミング言語
+- **Pydantic** - データバリデーション
+- **Uvicorn** - ASGIサーバー
+
+### データベース
+- **PostgreSQL 16** - リレーショナルデータベース
+- **pgvector** - ベクトル検索拡張
+
+### AI/LLM
+- **Ollama** - ローカルLLM実行環境
+- **gemma3:4b** - Google のオープンソースLLM (4Bパラメータ)
+- **nomic-embed-text** - テキスト埋め込みモデル
+- **Cloudflare Tunnel** - 安全な外部アクセス (`https://ollama.kabu-ai.jp`)
+
+### インフラ
+- **Docker** - コンテナ化
+- **Docker Compose** - マルチコンテナ管理
+
+---
+
+## 🏗️ システム構成
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ユーザー (ブラウザ)                        │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  フロントエンド (Next.js 15 + React 19)                      │
+│  - ドキュメントアップロード画面                               │
+│  - 質問応答インターフェース                                   │
+│  - ドキュメント一覧・詳細表示                                 │
+│  ポート: 3000                                                │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ↓ REST API
+┌─────────────────────────────────────────────────────────────┐
+│  バックエンド (FastAPI + Python 3.11)                        │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  マルチエージェントシステム                          │   │
+│  │  1. Document Classifier  (文書分類)                 │   │
+│  │  2. Chunking Agent       (チャンク分割)             │   │
+│  │  3. Fact Extractor       (情報抽出)                 │   │
+│  │  4. Quality Guardian     (品質チェック)             │   │
+│  │  5. SQL Query Agent      (クエリ生成)               │   │
+│  │  6. Answer Formatter     (回答整形)                 │   │
+│  │  7. Intent Router        (意図判定)                 │   │
+│  │  8. QA Agent             (質問応答)                 │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ポート: 8000                                                │
+└─────────────────────────────────────────────────────────────┘
+         │                                    │
+         ↓ HTTPS                              ↓ SQL + Vector Search
+┌──────────────────────┐        ┌────────────────────────────┐
+│  Ollama (LLM)        │        │  PostgreSQL 16 + pgvector  │
+│  - gemma3:4b         │        │  - documents (文書メタ)     │
+│  - nomic-embed-text  │        │  - chunks (テキスト+埋込)   │
+│  via Cloudflare      │        │  - facts (抽出情報)         │
+│  ollama.kabu-ai.jp   │        │  ポート: 5432               │
+└──────────────────────┘        └────────────────────────────┘
 ```
 
-### バックエンドをローカルで起動
+---
 
-```bash
-cd backend
+## ✨ 主な機能
 
-# 仮想環境を作成（初回のみ）
-python -m venv venv
-venv\Scripts\activate
+### 1. ドキュメント取り込み
+- 契約書、議事録、請求書などを自動分類
+- AIによる構造化（会社名、日付、金額などを自動抽出）
+- チャンク分割してベクトルデータベースに保存
 
-# 依存関係をインストール（初回のみ）
-pip install -r requirements.txt
+### 2. ベクトル検索
+- PostgreSQL + pgvector による高速類似度検索
+- ハイブリッド検索（キーワード + ベクトル）
 
-# .envファイルが作成済みであることを確認
+### 3. 質問応答
+- 自然言語で質問すると関連ドキュメントを検索
+- LLM (gemma3:4b) が文脈を理解して回答生成
+- 回答の根拠となる文書を表示
 
-# サーバー起動
-uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+### 4. マルチエージェント処理
+- 各タスクに特化したAIエージェントが協調動作
+- ルールベース + LLM強化のハイブリッド処理
+
+---
+
+## 📁 プロジェクト構造
+
+```
+AIAgent/
+├── backend/                 # FastAPI バックエンド
+│   ├── src/
+│   │   ├── agents/         # AIエージェント実装
+│   │   ├── llm/            # LLM統合・プロンプト管理
+│   │   ├── storage/        # データベース・ストレージ
+│   │   └── main.py         # FastAPI アプリケーション
+│   ├── Dockerfile          # バックエンド用Dockerイメージ
+│   ├── requirements.txt    # Python依存関係
+│   └── .env               # バックエンド環境変数
+│
+├── frontend/               # Next.js フロントエンド
+│   ├── src/
+│   │   ├── app/           # Next.js App Router
+│   │   ├── components/    # Reactコンポーネント
+│   │   └── lib/           # ユーティリティ・API
+│   ├── package.json       # Node.js依存関係
+│   └── .env.local         # フロントエンド環境変数
+│
+├── config/                 # 設定ファイル
+│   ├── database/          # DB初期化スクリプト
+│   └── dify/              # Difyプロンプト・ワークフロー
+│
+├── data/                   # アップロードデータ（Git除外）
+├── docker-compose.yml      # Docker構成
+├── setup.bat              # 初回セットアップ
+├── start.bat              # 起動スクリプト
+├── stop.bat               # 停止スクリプト
+└── README.md
 ```
 
-### フロントエンドをローカルで起動
+---
 
-```bash
-cd frontend
+## 💡 使い方
 
-# 開発サーバー起動
-npm run dev
-```
+### ドキュメントのアップロード
 
-## 設定ファイル
+1. http://localhost:3000 にアクセス
+2. 「Upload」ページを開く
+3. ファイルをドラッグ&ドロップまたは選択
+4. 自動的に分類・構造化され、データベースに保存される
+
+### 質問応答
+
+1. 「Query」ページを開く
+2. 質問を入力（例: 「契約書の有効期限はいつまで？」）
+3. システムが関連ドキュメントを検索し、AIが回答を生成
+
+### ドキュメント一覧
+
+- アップロードされたすべてのドキュメントを確認
+- ドキュメントをクリックして詳細を表示
+
+---
+
+## ⚙️ 詳細な設定
 
 ### バックエンド設定 (`backend/.env`)
 
 ```env
-# データベース
-POSTGRES_HOST=localhost
+# データベース接続
+POSTGRES_HOST=postgres        # Docker環境では 'postgres'
 POSTGRES_PORT=5432
 POSTGRES_DB=aiagent
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=aiagent123
 
-# AI設定（Ollama via Cloudflare Tunnel）
+# Ollama設定
 AI_PROVIDER=ollama
-AI_BASE_URL=https://ollama.kabu-ai.jp
+AI_BASE_URL=https://ollama.kabu-ai.jp  # Cloudflare Tunnel経由
 AI_MODEL=gemma3:4b
 AI_EMBEDDING_MODEL=nomic-embed-text
 AI_ENABLED=true
+
+# 並列処理設定
+AI_MAX_CONCURRENT_EMBEDDINGS=4
+AI_MAX_CONCURRENT_DOCUMENTS=3
+
+# エージェント別LLM有効化
+LLM_FACT_EXTRACTOR_ENABLED=true
+LLM_SQL_QUERY_ENABLED=true
+LLM_ANSWER_FORMATTER_ENABLED=true
+LLM_DOCUMENT_CLASSIFIER_ENABLED=true
+LLM_QUALITY_GUARDIAN_ENABLED=true
 ```
 
 ### フロントエンド設定 (`frontend/.env.local`)
@@ -151,84 +225,16 @@ AI_ENABLED=true
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-## プロジェクト構造
+### Ollama接続について
 
-```
-AIAgent/
-├── backend/              # FastAPIバックエンド
-│   ├── src/
-│   │   ├── agents/      # AIエージェント
-│   │   ├── llm/         # LLM統合
-│   │   └── storage/     # データストレージ
-│   ├── requirements.txt
-│   └── .env
-├── frontend/            # Next.jsフロントエンド
-│   ├── src/
-│   │   ├── app/        # Next.js App Router
-│   │   ├── components/ # Reactコンポーネント
-│   │   └── lib/        # ユーティリティ
-│   ├── package.json
-│   └── .env.local
-├── config/              # 設定ファイル
-│   └── database/       # DB初期化スクリプト
-├── data/                # アップロードデータ
-├── docker-compose.yml   # Docker構成
-├── start.bat           # 起動スクリプト（Windows）
-├── stop.bat            # 停止スクリプト（Windows）
-└── README.md
-```
+バックエンドは `https://ollama.kabu-ai.jp` 経由でOllamaに接続します：
 
-## 使い方
-
-### 1. ドキュメントのアップロード
-
-1. http://localhost:3000 にアクセス
-2. 「Upload」ページを開く
-3. ファイルをドラッグ&ドロップまたは選択
-4. 自動的に分類・構造化され、データベースに保存される
-
-### 2. 質問応答
-
-1. 「Query」ページを開く
-2. 質問を入力（例: 「契約書の有効期限はいつまで？」）
-3. システムが関連ドキュメントを検索し、AIが回答を生成
-
-### 3. ドキュメント一覧
-
-- アップロードされたすべてのドキュメントを確認
-- ドキュメントをクリックして詳細を表示
-
-## LLM（Ollama）の設定
-
-このプロジェクトでは、Ollamaを外部ドメイン経由でアクセスします:
-
-- **外部URL**: `https://ollama.kabu-ai.jp` （Cloudflare Tunnel経由）
-- **モデル**: `gemma3:4b` （総合評価1位、90.59点）
+- **外部URL**: `https://ollama.kabu-ai.jp`
+- **モデル**: `gemma3:4b`
 - **埋め込みモデル**: `nomic-embed-text`
-- **プロバイダー**: Ollama（ローカルLLM）
+- **接続方式**: Cloudflare Tunnel経由のHTTPS
 
-### Ollama接続の仕組み
-
-1. **ローカルOllamaサーバー**: `http://localhost:11434`でリッスン
-2. **Cloudflare Tunnel**: ローカルサーバーを外部公開
-3. **外部ドメイン**: `https://ollama.kabu-ai.jp`でHTTPS経由でアクセス可能
-4. **バックエンド接続**: AIAgentバックエンドは`https://ollama.kabu-ai.jp`経由でOllamaにアクセス
-
-この設定により、Ollamaサーバーがローカルまたは別のマシンで稼働していても、安全にHTTPS経由でアクセスできます。
-
-### 設定ファイル（backend/.env）
-
-```env
-# Ollama設定
-AI_PROVIDER=ollama
-AI_BASE_URL=https://ollama.kabu-ai.jp
-AI_MODEL=gemma3:4b
-AI_EMBEDDING_MODEL=nomic-embed-text
-AI_ENABLED=true
-```
-
-### 接続確認方法
-
+接続確認:
 ```bash
 # Ollamaサーバーの健全性チェック
 curl https://ollama.kabu-ai.jp/
@@ -236,11 +242,13 @@ curl https://ollama.kabu-ai.jp/
 # 利用可能なモデル一覧
 curl https://ollama.kabu-ai.jp/api/tags
 
-# バックエンドのヘルスチェック（Ollama接続状態も確認）
+# バックエンドのヘルスチェック
 curl http://localhost:8000/health
 ```
 
-## トラブルシューティング
+---
+
+## 🛠️ トラブルシューティング
 
 ### バックエンドに接続できない
 
@@ -260,213 +268,27 @@ docker-compose ps postgres
 
 # データベースログを確認
 docker-compose logs postgres
-```
-
-### Ollamaに接続できない
-
-```bash
-# Ollamaの健全性チェック
-curl https://ollama.kabu-ai.jp/
-
-# バックエンドのヘルスチェック
-curl http://localhost:8000/health
-```
-
-## 停止方法
-
-```bash
-# 起動スクリプトで起動した場合
-stop.bat
-
-# または手動で
-docker-compose down
-```
-
-フロントエンドは別ウィンドウで実行されているため、`Ctrl+C`で手動停止してください。
-
-## 開発
-
-### テストの実行
-
-```bash
-cd backend
-pytest
-```
-
-### コードフォーマット
-
-```bash
-# バックエンド
-cd backend
-black src/
-isort src/
-
-# フロントエンド
-cd frontend
-npm run lint
-```
-
-## 実施した設定内容の詳細
-
-このプロジェクトは、フロントエンド・バックエンド含めてすぐに起動できるように以下の設定を実施しています。
-
-### 1. バックエンド環境設定（backend/.env）
-
-```env
-# データベース接続
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=aiagent
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=aiagent123
-
-# Ollama設定（重要）
-AI_PROVIDER=ollama
-AI_BASE_URL=https://ollama.kabu-ai.jp  # Cloudflare Tunnel経由のHTTPSアクセス
-AI_MODEL=gemma3:4b                      # メインモデル
-AI_EMBEDDING_MODEL=nomic-embed-text     # ベクトル埋め込み用
-AI_ENABLED=true                         # LLM機能を有効化
-
-# 並列処理設定
-AI_MAX_CONCURRENT_EMBEDDINGS=4          # 同時埋め込み生成数
-AI_MAX_CONCURRENT_DOCUMENTS=3           # 同時ドキュメント処理数
-
-# エージェント別LLM有効化（すべてtrue）
-LLM_FACT_EXTRACTOR_ENABLED=true
-LLM_SQL_QUERY_ENABLED=true
-LLM_ANSWER_FORMATTER_ENABLED=true
-LLM_DOCUMENT_CLASSIFIER_ENABLED=true
-LLM_QUALITY_GUARDIAN_ENABLED=true
-```
-
-**重要**: `AI_BASE_URL=https://ollama.kabu-ai.jp` の設定により、バックエンドは外部ドメイン経由でOllamaにアクセスします。この設定は `C:\Users\meiteko\projects\ollama\access_urls_guide.md` で定義されたCloudflare Tunnelの設定に基づいています。
-
-### 2. フロントエンド環境設定（frontend/.env.local）
-
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
-```
-
-この設定により、フロントエンドはローカルで稼働するバックエンドAPIに接続します。
-
-### 3. Docker Compose設定
-
-`docker-compose.yml` に以下のサービスを定義:
-
-- **postgres**: PostgreSQL 16 + pgvector拡張（ベクトル検索用）
-- **backend**: FastAPIバックエンド（ポート8000）
-
-バックエンドはPostgreSQLの起動を待機してから起動します（`depends_on`設定）。
-
-### 4. 起動の流れ
-
-#### 初回セットアップ（setup.bat）
-1. フロントエンドの依存関係をインストール（`npm install`）
-2. 環境設定ファイルの存在確認
-3. Dockerイメージのビルド
-
-#### アプリケーション起動（start.bat）
-1. フロントエンドの依存関係を確認（未インストールの場合は自動インストール）
-2. Docker Composeでデータベースとバックエンドを起動
-3. バックエンドの起動を待機（15秒）
-4. フロントエンド開発サーバーを別ウィンドウで起動
-
-### 5. Ollamaドメイン設定の詳細
-
-バックエンドは以下のURLでOllamaに接続します:
-
-```
-https://ollama.kabu-ai.jp
-```
-
-このドメインは、Cloudflare Tunnelを使用してローカルOllamaサーバー（`http://localhost:11434`）を外部公開しています。
-
-#### 接続の仕組み
-
-```
-[AIAgentバックエンド]
-    ↓ HTTPS
-[https://ollama.kabu-ai.jp (Cloudflare CDN)]
-    ↓ Cloudflare Tunnel
-[ローカルOllamaサーバー: localhost:11434]
-    ↓
-[gemma3:4bモデル]
-```
-
-#### 利点
-- **HTTPS**: 暗号化された安全な通信
-- **DDoS保護**: Cloudflareによる保護
-- **外部アクセス**: インターネット経由でどこからでもアクセス可能
-- **ファイアウォール不要**: Cloudflare Tunnelが自動的に接続を確立
-
-### 6. データベーススキーマ
-
-PostgreSQLには以下のテーブルが自動作成されます（`config/database/init.sql`）:
-
-- **documents**: アップロードされたドキュメント
-- **chunks**: ドキュメントをチャンク分割した結果
-- **facts**: 抽出された事実情報
-- **evidence**: 引用・根拠情報
-- **quality_checks**: 品質チェック結果
-
-chunksテーブルには `embedding vector(768)` カラムが追加され、ベクトル検索が可能です。
-
-### 7. 作成されたファイル一覧
-
-```
-AIAgent/
-├── backend/
-│   ├── .env                    # バックエンド環境変数（Ollama設定含む）
-│   └── Dockerfile              # バックエンドDockerイメージ定義
-├── frontend/
-│   └── .env.local              # フロントエンド環境変数
-├── docker-compose.yml          # PostgreSQL + バックエンドサービス定義
-├── setup.bat                   # 初回セットアップスクリプト
-├── start.bat                   # 起動スクリプト
-├── stop.bat                    # 停止スクリプト
-├── .gitignore                  # Git除外設定
-└── README.md                   # このファイル
-```
-
-## トラブルシューティング（詳細版）
-
-### Ollamaに接続できない場合
-
-```bash
-# 1. Ollamaドメインの疎通確認
-curl https://ollama.kabu-ai.jp/
-
-# 期待されるレスポンス: "Ollama is running"
-
-# 2. モデル一覧の取得
-curl https://ollama.kabu-ai.jp/api/tags
-
-# 期待されるレスポンス: gemma3:4bが含まれるJSON
-
-# 3. バックエンドのヘルスチェック
-curl http://localhost:8000/health
-
-# llm.available が true であることを確認
-```
-
-### データベースに接続できない場合
-
-```bash
-# PostgreSQLコンテナのログを確認
-docker-compose logs postgres
-
-# コンテナが起動しているか確認
-docker-compose ps
 
 # データベースに直接接続してテスト
 docker exec -it aiagent-postgres psql -U postgres -d aiagent
 ```
 
-### フロントエンドが起動しない場合
+### Ollamaに接続できない
 
 ```bash
-# node_modulesを削除して再インストール
+# Ollamaの疎通確認
+curl https://ollama.kabu-ai.jp/
+
+# バックエンドのヘルスチェック（Ollama接続状態も表示）
+curl http://localhost:8000/health
+```
+
+### フロントエンドが起動しない
+
+```bash
 cd frontend
+
+# node_modulesを削除して再インストール
 rm -rf node_modules
 npm install
 
@@ -474,10 +296,57 @@ npm install
 npm run build
 ```
 
-## ライセンス
+---
+
+## 🔧 手動起動（開発者向け）
+
+### データベースのみ起動
+
+```bash
+docker-compose up -d postgres
+```
+
+### バックエンドをローカルで起動
+
+```bash
+cd backend
+
+# 仮想環境を作成（初回のみ）
+python -m venv venv
+venv\Scripts\activate
+
+# 依存関係をインストール（初回のみ）
+pip install -r requirements.txt
+
+# サーバー起動
+uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**注意**: ローカル開発時は `backend/.env` の `POSTGRES_HOST=localhost` に変更してください。
+
+### フロントエンドをローカルで起動
+
+```bash
+cd frontend
+
+# 開発サーバー起動
+npm run dev
+```
+
+---
+
+## 📝 ライセンス
 
 MIT License
 
-## 貢献
+---
+
+## 🤝 貢献
 
 Pull Requestを歓迎します！
+
+---
+
+## 📧 お問い合わせ
+
+https://github.com/FGjp-techdes/AIAgent/issues
