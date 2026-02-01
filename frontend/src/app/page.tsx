@@ -180,7 +180,7 @@ export default function UploadPage() {
   }, [addFiles]);
 
   return (
-    <div className="max-w-2xl mx-auto h-full overflow-y-auto">
+    <div className="max-w-2xl mx-auto h-full flex flex-col">
       <h1 className="text-2xl font-bold mb-6">File Upload</h1>
 
       {/* Drop Zone */}
@@ -285,10 +285,12 @@ export default function UploadPage() {
         </div>
       )}
 
-      {/* Uploaded Documents */}
-      <div className="mt-8">
+      {/* Uploaded Documents - Scrollable Section */}
+      <div className="mt-8 flex-1 flex flex-col min-h-0">
         <h2 className="text-lg font-semibold mb-4">Uploaded Documents</h2>
-        <FileList refreshTrigger={refreshTrigger} />
+        <div className="flex-1 overflow-y-auto">
+          <FileList refreshTrigger={refreshTrigger} />
+        </div>
       </div>
     </div>
   );
