@@ -1,0 +1,202 @@
+{
+  "timestamp": "2026-01-29T21:53:19.149235",
+  "ingest": [
+    {
+      "filename": "test_01_company_profile.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_02_product_manual.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_03_service_contract.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_04_meeting_minutes.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_05_employee_handbook.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_06_technical_spec.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_07_sales_report.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_08_project_proposal.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_09_training_guide.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    },
+    {
+      "filename": "test_10_security_policy.txt",
+      "success": false,
+      "error": "All connection attempts failed"
+    }
+  ],
+  "test": {
+    "total": 20,
+    "correct": 0,
+    "accuracy": 0.0,
+    "results": [
+      {
+        "question": "テックイノベーションの資本金はいくらですか？",
+        "expected": "5億円",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "テックイノベーションの従業員数は何名ですか？",
+        "expected": "350名",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "SH-500の消費電力は何ワットですか？",
+        "expected": "最大15W",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "スマートホームコントローラーの最大接続デバイス数は？",
+        "expected": "100台",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "クラウドサービスの月額基本料金はいくらですか？",
+        "expected": "50万円",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "クラウドストレージの容量は何TBですか？",
+        "expected": "10TB",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "プロジェクトのリリース日はいつですか？",
+        "expected": "2026年3月15日",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "追加予算はいくら申請しますか？",
+        "expected": "500万円",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "年次有給休暇は入社時に何日付与されますか？",
+        "expected": "10日",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "住宅手当は世帯主の場合いくらですか？",
+        "expected": "5万円",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "APIのトークン有効期限は何時間ですか？",
+        "expected": "24時間",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "スタンダードプランのレート制限は？",
+        "expected": "1000リクエスト/分",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "2025年度の年間売上合計はいくらですか？",
+        "expected": "80億円",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "顧客継続率は何パーセントですか？",
+        "expected": "92%",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "AIチャットボットの開発費用はいくらですか？",
+        "expected": "3000万円",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "プロジェクトの本番稼働予定日はいつですか？",
+        "expected": "2026年11月1日",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "新入社員研修の期間は何ヶ月ですか？",
+        "expected": "3ヶ月",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "研修の確認テスト合格ラインは何点ですか？",
+        "expected": "70点",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "パスワードの最小文字数は何文字ですか？",
+        "expected": "12文字",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      },
+      {
+        "question": "連続ログイン失敗で何回でアカウントロックされますか？",
+        "expected": "5回",
+        "answer": null,
+        "is_correct": false,
+        "error": "All connection attempts failed"
+      }
+    ]
+  }
+}

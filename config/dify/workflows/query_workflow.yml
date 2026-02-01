@@ -1,0 +1,281 @@
+app:
+  description: "質問応答ワークフロー - ユーザーの質問から情報を検索し、整形して回答するパイプライン"
+  icon: "🔍"
+  icon_background: "#FFEAD5"
+  mode: workflow
+  name: "AIAgent - Query Pipeline"
+
+kind: app
+version: 0.1.1
+
+workflow:
+  conversation_variables: []
+  environment_variables:
+    - name: API_BASE_URL
+      value: "http://host.docker.internal:8000"
+      value_type: string
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: "質問を入力してください。登録された文書から情報を検索します。"
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions:
+      - "未完了のタスクを一覧表示してください"
+      - "今月の決定事項を教えてください"
+      - "リスクや課題を教えてください"
+    suggested_questions_after_answer:
+      enabled: true
+    text_to_speech:
+      enabled: false
+      language: ""
+      voice: ""
+  graph:
+    edges:
+      - data:
+          sourceType: start
+          targetType: llm
+        id: start-to-parse
+        source: start
+        sourceHandle: source
+        target: parse_query
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: llm
+          targetType: http-request
+        id: parse-to-search
+        source: parse_query
+        sourceHandle: source
+        target: search_db
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: http-request
+          targetType: llm
+        id: search-to-format
+        source: search_db
+        sourceHandle: source
+        target: format_answer
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: llm
+          targetType: end
+        id: format-to-end
+        source: format_answer
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+    nodes:
+      # Start Node
+      - data:
+          desc: "ユーザーの質問を受け取る"
+          selected: false
+          title: Start
+          type: start
+          variables:
+            - label: 質問
+              max_length: 1000
+              options: []
+              required: true
+              type: text-input
+              variable: question
+        height: 90
+        id: start
+        position:
+          x: 80
+          y: 282
+        positionAbsolute:
+          x: 80
+          y: 282
+        type: custom
+        width: 244
+
+      # LLM: SQL Query Agent
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: "質問から検索条件を生成"
+          model:
+            completion_params:
+              temperature: 0.1
+              max_tokens: 500
+            mode: chat
+            name: qwen2:7b
+            provider: ollama
+          prompt_template:
+            - role: system
+              text: |
+                あなたはSQLクエリ生成エージェントです。
+                ユーザーの質問から検索条件を生成してください。
+
+                ## 出力（必ずJSON形式で出力）
+
+                {
+                  "filters": {
+                    "owner_company": "会社名|null",
+                    "fact_type": ["task", "decision", "risk", "qna"],
+                    "status": ["open", "done"],
+                    "owner": "担当者名|null",
+                    "date_from": "YYYY-MM-DD|null",
+                    "date_to": "YYYY-MM-DD|null"
+                  },
+                  "keyword": "検索キーワード|null",
+                  "limit": 50
+                }
+
+                ## ルール
+                1. 推測しない。曖昧な場合は null
+                2. 日付は YYYY-MM-DD 形式
+                3. fact_type と status は配列（複数指定可）
+                4. 質問に含まれる情報のみ抽出
+
+                ## fact_type のマッピング
+                - 「タスク」「TODO」→ task
+                - 「決定」「決議」→ decision
+                - 「リスク」「課題」「懸念」→ risk
+                - 「質問」「Q&A」→ qna
+
+                ## status のマッピング
+                - 「未完了」「対応中」「オープン」→ open
+                - 「完了」「対応済み」「クローズ」→ done
+            - role: user
+              text: |
+                以下の質問から検索条件を生成してください。
+
+                質問: {{#start.question#}}
+          selected: false
+          title: "Parse Query"
+          type: llm
+          vision:
+            configs:
+              detail: high
+            enabled: false
+        height: 98
+        id: parse_query
+        position:
+          x: 384
+          y: 282
+        type: custom
+        width: 244
+
+      # HTTP Request: Search Database
+      - data:
+          authorization:
+            config: null
+            type: no-auth
+          body:
+            data:
+              - key: query
+                type: text
+                value: "{{#parse_query.text#}}"
+            type: json
+          desc: "データベースを検索"
+          headers: "Content-Type: application/json"
+          method: post
+          selected: false
+          timeout:
+            max_connect_timeout: 0
+            max_read_timeout: 60000
+            max_write_timeout: 0
+          title: "Search Database"
+          type: http-request
+          url: "{{#env.API_BASE_URL#}}/pipeline/query"
+        height: 178
+        id: search_db
+        position:
+          x: 688
+          y: 282
+        type: custom
+        width: 244
+
+      # LLM: Answer Formatter
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: "検索結果を整形"
+          model:
+            completion_params:
+              temperature: 0.3
+              max_tokens: 2000
+            mode: chat
+            name: qwen2:7b
+            provider: ollama
+          prompt_template:
+            - role: system
+              text: |
+                あなたは回答整形エージェントです。
+                検索結果のfactsを人間が読みやすい形式に整形してください。
+
+                ## 出力形式
+
+                必ず以下の形式で箇条書きにしてください：
+
+                ## 検索結果: N件
+
+                - [内容]
+                  - 担当: [担当者または「未設定」]
+                  - 期日: [日付または「未設定」]
+                  - 出典: [引用元]
+                  - **要確認** （信頼度が低い場合のみ表示）
+
+                ## ルール
+                1. 箇条書きで出力
+                2. 担当者（owner）と期日（due_date）を必ず含める
+                3. 出典（evidence）を必ず示す
+                4. confidence が 0.6 未満の場合「**要確認**」と明記
+                5. 該当がない場合「該当する情報が見つかりませんでした。」
+
+                ## 注意
+                - 情報を追加・改変しない
+                - factsの内容をそのまま整形する
+                - 推測や補足は加えない
+            - role: user
+              text: |
+                以下の検索結果を整形してください。
+
+                元の質問: {{#start.question#}}
+
+                検索結果:
+                {{#search_db.body#}}
+          selected: false
+          title: "Format Answer"
+          type: llm
+          vision:
+            configs:
+              detail: high
+            enabled: false
+        height: 98
+        id: format_answer
+        position:
+          x: 992
+          y: 282
+        type: custom
+        width: 244
+
+      # End Node
+      - data:
+          desc: ""
+          outputs:
+            - value_selector:
+                - format_answer
+                - text
+              variable: answer
+          selected: false
+          title: End
+          type: end
+        height: 90
+        id: end
+        position:
+          x: 1296
+          y: 282
+        type: custom
+        width: 244

@@ -1,0 +1,474 @@
+app:
+  description: "ドキュメント取り込みワークフロー - 文書を分類、分割、情報抽出、品質チェックするパイプライン"
+  icon: "📄"
+  icon_background: "#E4FBCC"
+  mode: workflow
+  name: "AIAgent - Ingestion Pipeline"
+
+kind: app
+version: 0.1.1
+
+workflow:
+  conversation_variables: []
+  environment_variables:
+    - name: API_BASE_URL
+      value: "http://host.docker.internal:8000"
+      value_type: string
+  features:
+    file_upload:
+      allowed_file_extensions:
+        - .pdf
+        - .docx
+        - .txt
+        - .csv
+        - .xlsx
+      allowed_file_types:
+        - document
+        - custom
+      allowed_file_upload_methods:
+        - local_file
+      enabled: true
+      fileUploadConfig:
+        file_size_limit: 15
+        batch_count_limit: 5
+      max_file_upload_limit: 5
+      number_limits: 1
+    opening_statement: ""
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ""
+      voice: ""
+  graph:
+    edges:
+      - data:
+          sourceType: start
+          targetType: http-request
+        id: start-to-upload
+        source: start
+        sourceHandle: source
+        target: upload_file
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: http-request
+          targetType: llm
+        id: upload-to-classify
+        source: upload_file
+        sourceHandle: source
+        target: classify_document
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: llm
+          targetType: http-request
+        id: classify-to-chunk-api
+        source: classify_document
+        sourceHandle: source
+        target: chunk_api
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: http-request
+          targetType: llm
+        id: chunk-api-to-extract
+        source: chunk_api
+        sourceHandle: source
+        target: extract_facts
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: llm
+          targetType: llm
+        id: extract-to-quality
+        source: extract_facts
+        sourceHandle: source
+        target: quality_check
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: llm
+          targetType: http-request
+        id: quality-to-save
+        source: quality_check
+        sourceHandle: source
+        target: save_to_db
+        targetHandle: target
+        type: custom
+      - data:
+          sourceType: http-request
+          targetType: end
+        id: save-to-end
+        source: save_to_db
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+    nodes:
+      # Start Node
+      - data:
+          desc: "ファイルアップロード開始"
+          selected: false
+          title: Start
+          type: start
+          variables:
+            - label: file
+              max_length: null
+              options: []
+              required: true
+              type: file
+              variable: file
+        height: 90
+        id: start
+        position:
+          x: 80
+          y: 282
+        positionAbsolute:
+          x: 80
+          y: 282
+        type: custom
+        width: 244
+
+      # HTTP Request: Upload File
+      - data:
+          authorization:
+            config: null
+            type: no-auth
+          body:
+            data: []
+            type: none
+          desc: "ファイルをAPIにアップロード"
+          headers: ""
+          method: post
+          selected: false
+          timeout:
+            max_connect_timeout: 0
+            max_read_timeout: 0
+            max_write_timeout: 0
+          title: "Upload File"
+          type: http-request
+          url: "{{#env.API_BASE_URL#}}/upload"
+          variables:
+            - value_selector:
+                - start
+                - file
+              variable: file
+        height: 178
+        id: upload_file
+        position:
+          x: 384
+          y: 282
+        type: custom
+        width: 244
+
+      # LLM: Document Classifier
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: "文書を分類"
+          model:
+            completion_params:
+              temperature: 0.1
+              max_tokens: 500
+            mode: chat
+            name: qwen2:7b
+            provider: ollama
+          prompt_template:
+            - role: system
+              text: |
+                あなたはドキュメント分類エージェントです。
+                入力された文書情報から、文書の種類を判定してください。
+
+                ## 入力
+                - file_name: ファイル名
+                - file_type: ファイルタイプ（MIME type）
+                - raw_text: 文書の先頭3000文字
+
+                ## 出力（必ずJSON形式で出力）
+
+                {
+                  "doc_type": "minutes|contract|manual|invoice|csv|other|unknown",
+                  "owner_company": "会社名|null",
+                  "doc_date": "YYYY-MM-DD|null",
+                  "language": "ja|en|null",
+                  "confidence": 0.0〜1.0,
+                  "rationale": "判定理由"
+                }
+
+                ## ルール
+                1. 推測禁止。不明な場合は null を返す
+                2. 日付は明確に記載されている場合のみ抽出
+                3. 会社名は明確に記載されている場合のみ抽出
+                4. confidence は判定の確信度（0〜1）
+
+                ## doc_type の判定基準
+                - minutes: 議事録、会議メモ（「議事録」「出席者」「決定事項」等）
+                - contract: 契約書（「契約」「甲」「乙」「条項」等）
+                - manual: マニュアル、手順書（「手順」「操作方法」「ガイド」等）
+                - invoice: 請求書（「請求」「振込先」「金額」等）
+                - csv: CSVデータ
+                - other: 上記以外で内容が判別可能
+                - unknown: 判別不能
+            - role: user
+              text: |
+                以下の文書を分類してください。
+
+                ファイル名: {{#upload_file.body.file_name#}}
+                ファイルタイプ: {{#upload_file.body.file_type#}}
+
+                文書内容:
+                {{#upload_file.body.raw_text#}}
+          selected: false
+          title: "Classify Document"
+          type: llm
+          vision:
+            configs:
+              detail: high
+            enabled: false
+        height: 98
+        id: classify_document
+        position:
+          x: 688
+          y: 282
+        type: custom
+        width: 244
+
+      # HTTP Request: Chunk API
+      - data:
+          authorization:
+            config: null
+            type: no-auth
+          body:
+            data:
+              - key: file_id
+                type: text
+                value: "{{#upload_file.body.file_id#}}"
+              - key: doc_type
+                type: text
+                value: "{{#classify_document.text#}}"
+            type: json
+          desc: "テキストをチャンクに分割"
+          headers: "Content-Type: application/json"
+          method: post
+          selected: false
+          timeout:
+            max_connect_timeout: 0
+            max_read_timeout: 0
+            max_write_timeout: 0
+          title: "Chunk Text"
+          type: http-request
+          url: "{{#env.API_BASE_URL#}}/agents/chunk"
+        height: 178
+        id: chunk_api
+        position:
+          x: 992
+          y: 282
+        type: custom
+        width: 244
+
+      # LLM: Fact Extractor
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: "情報を抽出"
+          model:
+            completion_params:
+              temperature: 0.2
+              max_tokens: 4000
+            mode: chat
+            name: qwen2:7b
+            provider: ollama
+          prompt_template:
+            - role: system
+              text: |
+                あなたは情報抽出エージェントです。
+                文書チャンクから業務で使える「事実（facts）」を抽出してください。
+
+                ## 出力（必ずJSON形式で出力）
+
+                {
+                  "facts": [
+                    {
+                      "fact_type": "task|decision|risk|qna|requirement|summary",
+                      "title": "タイトル|null",
+                      "body": "内容（必須）",
+                      "owner": "担当者|null",
+                      "due_date": "YYYY-MM-DD|null",
+                      "status": "open|done|unknown|null",
+                      "evidence": {
+                        "quotes": [
+                          {
+                            "quote": "原文の引用",
+                            "page": ページ番号,
+                            "chunk_index": チャンク番号
+                          }
+                        ]
+                      },
+                      "confidence": 0.0〜1.0
+                    }
+                  ]
+                }
+
+                ## ルール
+                1. evidence（引用）は必須
+                2. 推測禁止。不明は null
+                3. body は必須
+                4. 原文に明記されている情報のみ抽出
+
+                ## fact_type の判定基準
+                - task: TODO、タスク、対応事項
+                - decision: 決定事項、合意事項
+                - risk: リスク、懸念、課題
+                - qna: 質問と回答
+                - requirement: 要件、仕様
+                - summary: 上記に該当しない要約
+            - role: user
+              text: |
+                以下のチャンクから事実を抽出してください。
+
+                文書タイプ: {{#classify_document.text#}}
+
+                チャンク:
+                {{#chunk_api.body#}}
+          selected: false
+          title: "Extract Facts"
+          type: llm
+          vision:
+            configs:
+              detail: high
+            enabled: false
+        height: 98
+        id: extract_facts
+        position:
+          x: 1296
+          y: 282
+        type: custom
+        width: 244
+
+      # LLM: Quality Guardian
+      - data:
+          context:
+            enabled: false
+            variable_selector: []
+          desc: "品質チェック"
+          model:
+            completion_params:
+              temperature: 0.1
+              max_tokens: 500
+            mode: chat
+            name: qwen2:7b
+            provider: ollama
+          prompt_template:
+            - role: system
+              text: |
+                あなたは品質判定エージェントです。
+                抽出された情報が信頼できるかを判定してください。
+
+                ## 出力（必ずJSON形式で出力）
+
+                {
+                  "needs_review": true または false,
+                  "reasons": ["要確認の理由"],
+                  "facts": [抽出されたfacts（そのまま引き継ぐ）]
+                }
+
+                ## 判定条件（以下のいずれかに該当する場合 needs_review: true）
+
+                1. facts が 0件
+                2. confidence が 0.5 未満のfactがある
+                3. 日付や担当者が不明確
+                4. 矛盾する情報がある
+
+                ## 判定の注意
+                - 厳しめに判定する
+                - 不明確な場合は要確認とする
+                - reasons には具体的な理由を記載
+            - role: user
+              text: |
+                以下の抽出結果の品質を判定してください。
+
+                抽出されたfacts:
+                {{#extract_facts.text#}}
+          selected: false
+          title: "Quality Check"
+          type: llm
+          vision:
+            configs:
+              detail: high
+            enabled: false
+        height: 98
+        id: quality_check
+        position:
+          x: 1600
+          y: 282
+        type: custom
+        width: 244
+
+      # HTTP Request: Save to DB
+      - data:
+          authorization:
+            config: null
+            type: no-auth
+          body:
+            data:
+              - key: file_id
+                type: text
+                value: "{{#upload_file.body.file_id#}}"
+              - key: classification
+                type: text
+                value: "{{#classify_document.text#}}"
+              - key: quality_result
+                type: text
+                value: "{{#quality_check.text#}}"
+            type: json
+          desc: "結果をDBに保存"
+          headers: "Content-Type: application/json"
+          method: post
+          selected: false
+          timeout:
+            max_connect_timeout: 0
+            max_read_timeout: 0
+            max_write_timeout: 0
+          title: "Save to Database"
+          type: http-request
+          url: "{{#env.API_BASE_URL#}}/pipeline/ingest"
+        height: 178
+        id: save_to_db
+        position:
+          x: 1904
+          y: 282
+        type: custom
+        width: 244
+
+      # End Node
+      - data:
+          desc: ""
+          outputs:
+            - value_selector:
+                - quality_check
+                - text
+              variable: result
+            - value_selector:
+                - save_to_db
+                - body
+              variable: saved_data
+          selected: false
+          title: End
+          type: end
+        height: 90
+        id: end
+        position:
+          x: 2208
+          y: 282
+        type: custom
+        width: 244
