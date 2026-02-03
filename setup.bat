@@ -1,34 +1,39 @@
 @echo off
+chcp 65001 >nul 2>&1
+setlocal enabledelayedexpansion
+
 echo ================================
-echo AIAgent 初期セットアップ
+echo AIAgent Initial Setup
 echo ================================
 echo.
-echo このスクリプトは以下を実行します:
-echo 1. フロントエンドの依存関係インストール
-echo 2. 環境設定ファイルの確認
-echo 3. Dockerイメージのビルド
+echo This script will:
+echo 1. Install frontend dependencies
+echo 2. Check environment configuration files
+echo 3. Build Docker images
 echo.
 pause
 echo.
 
-REM フロントエンドの依存関係をインストール
-echo [1/3] フロントエンドの依存関係をインストール中...
+cd /d %~dp0
+
+REM Install frontend dependencies
+echo [1/3] Installing frontend dependencies...
 cd frontend
 call npm install
-if %errorlevel% neq 0 (
-    echo エラー: npm installに失敗しました。
+if !errorlevel! neq 0 (
+    echo ERROR: npm install failed.
     pause
     exit /b 1
 )
 cd ..
 echo.
 
-REM 環境設定ファイルの確認
-echo [2/3] 環境設定ファイルを確認中...
+REM Check environment configuration files
+echo [2/3] Checking environment configuration files...
 
 if not exist "backend\.env" (
-    echo エラー: backend\.env が見つかりません。
-    echo .env.exampleを参考にbackend\.envを作成してください。
+    echo ERROR: backend\.env not found.
+    echo Please create backend\.env based on .env.example.
     pause
     exit /b 1
 ) else (
@@ -36,8 +41,8 @@ if not exist "backend\.env" (
 )
 
 if not exist "frontend\.env.local" (
-    echo エラー: frontend\.env.local が見つかりません。
-    echo .env.exampleを参考にfrontend\.env.localを作成してください。
+    echo ERROR: frontend\.env.local not found.
+    echo Please create frontend\.env.local with NEXT_PUBLIC_API_URL=http://localhost:8001
     pause
     exit /b 1
 ) else (
@@ -45,21 +50,42 @@ if not exist "frontend\.env.local" (
 )
 echo.
 
-REM Dockerイメージをビルド
-echo [3/3] Dockerイメージをビルド中...
-docker-compose build
-if %errorlevel% neq 0 (
-    echo エラー: Dockerイメージのビルドに失敗しました。
-    pause
-    exit /b 1
+REM Check Docker and build images
+echo [3/3] Building Docker images...
+
+REM Check if Docker is running
+docker info >nul 2>&1
+if !errorlevel! neq 0 (
+    echo.
+    echo WARNING: Docker is not running.
+    echo.
+    echo Please start Docker Desktop and run setup.bat again,
+    echo or run start.bat which will start Docker automatically.
+    echo.
+    echo Skipping Docker image build...
+    goto setup_complete
+)
+
+REM Detect docker compose command
+set DOCKER_COMPOSE=docker-compose
+docker-compose version >nul 2>&1
+if !errorlevel! neq 0 (
+    set DOCKER_COMPOSE=docker compose
+)
+
+%DOCKER_COMPOSE% build
+if !errorlevel! neq 0 (
+    echo WARNING: Docker image build failed, but you can continue.
+    echo start.bat will attempt to build images when starting.
 )
 echo.
 
+:setup_complete
 echo ================================
-echo セットアップ完了！
+echo Setup Complete!
 echo ================================
 echo.
-echo 次のコマンドでアプリケーションを起動できます:
+echo Run the following command to start the application:
 echo start.bat
 echo.
 pause

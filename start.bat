@@ -8,7 +8,7 @@ echo.
 cd /d %~dp0
 
 REM Check Docker status
-echo [0/3] Checking Docker status...
+echo [1/4] Checking Docker status...
 docker info > nul 2>&1
 if !errorlevel! neq 0 (
     echo Docker is not running. Starting Docker Desktop...
@@ -74,18 +74,58 @@ echo.
 echo Starting backend and frontend...
 echo.
 
+REM Find Python executable
+set PYTHON_EXE=
+REM Check for virtual environment first
+if exist "%~dp0backend\venv\Scripts\python.exe" (
+    set PYTHON_EXE=%~dp0backend\venv\Scripts\python.exe
+    echo Found Python in virtual environment
+) else (
+    REM Check common Python locations
+    where python >nul 2>&1
+    if !errorlevel! equ 0 (
+        for /f "delims=" %%i in ('where python') do (
+            if not defined PYTHON_EXE set PYTHON_EXE=%%i
+        )
+        echo Found Python: !PYTHON_EXE!
+    ) else if exist "C:\ProgramData\miniconda3\python.exe" (
+        set PYTHON_EXE=C:\ProgramData\miniconda3\python.exe
+        echo Found Python in miniconda3
+    ) else if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+        set PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe
+        echo Found Python 3.11
+    ) else if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" (
+        set PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python310\python.exe
+        echo Found Python 3.10
+    )
+)
+
+if not defined PYTHON_EXE (
+    echo ERROR: Python not found. Please install Python 3.10+ or create a virtual environment.
+    echo.
+    echo To create a virtual environment:
+    echo   cd backend
+    echo   python -m venv venv
+    echo   venv\Scripts\activate
+    echo   pip install -r requirements.txt
+    pause
+    exit /b 1
+)
+
 REM Start backend in a new window
-echo [1/3] Starting backend (port 8001)...
-start "AIAgent Backend" cmd /k "cd /d %~dp0backend && C:\ProgramData\miniconda3\python.exe -m uvicorn src.main:app --host 0.0.0.0 --port 8001 --reload"
+echo [2/4] Starting backend (port 8001)...
+start "AIAgent Backend" cmd /k "cd /d %~dp0backend && "!PYTHON_EXE!" -m uvicorn src.main:app --host 0.0.0.0 --port 8001 --reload"
 
 REM Wait for backend to start
 echo Waiting for backend to start...
 timeout /t 8 /nobreak > nul
 
 REM Start frontend in a new window
-echo [2/3] Starting frontend (port 3000)...
+echo [3/4] Starting frontend (port 3000)...
 start "AIAgent Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 
+echo [4/4] Verifying services...
+timeout /t 3 /nobreak > nul
 echo.
 echo ================================
 echo Startup Complete!

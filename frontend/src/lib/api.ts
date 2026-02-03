@@ -58,6 +58,7 @@ export interface QueryResult {
   has_answer: boolean;
   search_mode: string;
   error: string | null;
+  search_time_seconds: number | null;
 }
 
 export async function checkHealth(): Promise<HealthStatus> {

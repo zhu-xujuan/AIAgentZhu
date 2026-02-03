@@ -5,17 +5,23 @@ Handles document storage, chunk management, and vector similarity search.
 
 import os
 import logging
+from contextlib import contextmanager
 from datetime import date
 from typing import Optional, TYPE_CHECKING
 from dataclasses import dataclass
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
 
 if TYPE_CHECKING:
     from src.llm.ai_client import AIClient as OllamaClient
 
 logger = logging.getLogger(__name__)
+
+# Connection pool settings from environment
+DB_POOL_MIN_CONN = int(os.getenv("DB_POOL_MIN_CONN", "2"))
+DB_POOL_MAX_CONN = int(os.getenv("DB_POOL_MAX_CONN", "10"))
 
 
 @dataclass
@@ -63,6 +69,8 @@ class DatabaseService:
     - Document and chunk storage
     - Embedding storage
     - Vector similarity search
+
+    Uses connection pooling for better performance under concurrent load.
     """
 
     def __init__(
@@ -77,27 +85,63 @@ class DatabaseService:
         self.port = port or int(os.getenv("POSTGRES_PORT", "5432"))
         self.database = database or os.getenv("POSTGRES_DB", "aiagent")
         self.user = user or os.getenv("POSTGRES_USER", "postgres")
-        self.password = password or os.getenv("POSTGRES_PASSWORD", "aiagent123")
-        self._conn = None
+        self.password = password or os.getenv("POSTGRES_PASSWORD")
+        if not self.password:
+            raise ValueError("POSTGRES_PASSWORD environment variable is required")
 
-    def _get_connection(self):
-        """Get or create database connection."""
-        if self._conn is None or self._conn.closed:
-            self._conn = psycopg2.connect(
+        self._pool: Optional[pool.ThreadedConnectionPool] = None
+        self._vector_support_cached: Optional[bool] = None
+        self._init_pool()
+
+    def _init_pool(self):
+        """Initialize the connection pool."""
+        try:
+            self._pool = pool.ThreadedConnectionPool(
+                minconn=DB_POOL_MIN_CONN,
+                maxconn=DB_POOL_MAX_CONN,
                 host=self.host,
                 port=self.port,
                 database=self.database,
                 user=self.user,
                 password=self.password,
-                connect_timeout=3,  # 3 second timeout
+                connect_timeout=5,
             )
-        return self._conn
+            logger.info(f"Database connection pool initialized (min={DB_POOL_MIN_CONN}, max={DB_POOL_MAX_CONN})")
+        except Exception as e:
+            logger.error(f"Failed to initialize connection pool: {e}")
+            raise
+
+    @contextmanager
+    def _get_connection(self):
+        """Get a connection from the pool with automatic return."""
+        if self._pool is None:
+            raise RuntimeError("Database connection pool is not initialized")
+
+        conn = None
+        try:
+            conn = self._pool.getconn()
+            yield conn
+        finally:
+            if conn is not None:
+                self._pool.putconn(conn)
+
+    @contextmanager
+    def _get_cursor(self, dict_cursor: bool = False):
+        """Get a cursor with automatic cleanup and connection return."""
+        with self._get_connection() as conn:
+            cursor_factory = RealDictCursor if dict_cursor else None
+            cursor = conn.cursor(cursor_factory=cursor_factory)
+            try:
+                yield cursor, conn
+            finally:
+                cursor.close()
 
     def close(self):
-        """Close database connection."""
-        if self._conn is not None and not self._conn.closed:
-            self._conn.close()
-            self._conn = None
+        """Close all database connections in the pool."""
+        if self._pool is not None:
+            self._pool.closeall()
+            self._pool = None
+            logger.info("Database connection pool closed")
 
     def find_by_checksum(self, checksum: str) -> Optional[DocumentRecord]:
         """
@@ -109,31 +153,29 @@ class DatabaseService:
         Returns:
             DocumentRecord if found, None otherwise
         """
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
         try:
-            cursor.execute(
-                "SELECT * FROM documents WHERE checksum = %s LIMIT 1",
-                (checksum,)
-            )
-            row = cursor.fetchone()
-
-            if row:
-                return DocumentRecord(
-                    id=row["id"],
-                    file_id=row["file_id"],
-                    file_name=row["file_name"],
-                    file_type=row.get("file_type"),
-                    doc_type=row.get("doc_type"),
-                    owner_company=row.get("owner_company"),
-                    doc_date=row.get("doc_date"),
-                    language=row.get("language"),
-                    confidence=row.get("confidence"),
-                    storage_path=row.get("storage_path"),
-                    checksum=row.get("checksum"),
+            with self._get_cursor(dict_cursor=True) as (cursor, conn):
+                cursor.execute(
+                    "SELECT * FROM documents WHERE checksum = %s LIMIT 1",
+                    (checksum,)
                 )
-            return None
+                row = cursor.fetchone()
+
+                if row:
+                    return DocumentRecord(
+                        id=row["id"],
+                        file_id=row["file_id"],
+                        file_name=row["file_name"],
+                        file_type=row.get("file_type"),
+                        doc_type=row.get("doc_type"),
+                        owner_company=row.get("owner_company"),
+                        doc_date=row.get("doc_date"),
+                        language=row.get("language"),
+                        confidence=row.get("confidence"),
+                        storage_path=row.get("storage_path"),
+                        checksum=row.get("checksum"),
+                    )
+                return None
 
         except Exception as e:
             logger.error(f"Failed to find document by checksum: {e}")
@@ -150,38 +192,36 @@ class DatabaseService:
         Returns:
             List of DocumentRecord objects
         """
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
         try:
-            cursor.execute(
-                """
-                SELECT d.*,
-                       (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) as chunks_count
-                FROM documents d
-                ORDER BY d.created_at DESC
-                LIMIT %s OFFSET %s
-                """,
-                (limit, offset)
-            )
-            rows = cursor.fetchall()
-
-            return [
-                DocumentRecord(
-                    id=row["id"],
-                    file_id=row["file_id"],
-                    file_name=row["file_name"],
-                    file_type=row.get("file_type"),
-                    doc_type=row.get("doc_type"),
-                    owner_company=row.get("owner_company"),
-                    doc_date=row.get("doc_date"),
-                    language=row.get("language"),
-                    confidence=row.get("confidence"),
-                    storage_path=row.get("storage_path"),
-                    checksum=row.get("checksum"),
+            with self._get_cursor(dict_cursor=True) as (cursor, conn):
+                cursor.execute(
+                    """
+                    SELECT d.*,
+                           (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) as chunks_count
+                    FROM documents d
+                    ORDER BY d.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (limit, offset)
                 )
-                for row in rows
-            ]
+                rows = cursor.fetchall()
+
+                return [
+                    DocumentRecord(
+                        id=row["id"],
+                        file_id=row["file_id"],
+                        file_name=row["file_name"],
+                        file_type=row.get("file_type"),
+                        doc_type=row.get("doc_type"),
+                        owner_company=row.get("owner_company"),
+                        doc_date=row.get("doc_date"),
+                        language=row.get("language"),
+                        confidence=row.get("confidence"),
+                        storage_path=row.get("storage_path"),
+                        checksum=row.get("checksum"),
+                    )
+                    for row in rows
+                ]
 
         except Exception as e:
             logger.error(f"Failed to get documents: {e}")
@@ -212,56 +252,54 @@ class DatabaseService:
         Returns:
             Tuple of (Document ID, is_duplicate flag)
         """
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        # Check for duplicate by checksum (outside of transaction)
+        if checksum and not skip_duplicate_check:
+            existing = self.find_by_checksum(checksum)
+            if existing:
+                logger.info(f"Duplicate document found: {file_name} matches {existing.file_name} (id={existing.id})")
+                return existing.id, True
 
-        try:
-            # Check for duplicate by checksum
-            if checksum and not skip_duplicate_check:
-                existing = self.find_by_checksum(checksum)
-                if existing:
-                    logger.info(f"Duplicate document found: {file_name} matches {existing.file_name} (id={existing.id})")
-                    return existing.id, True
+        # Convert date string to date object
+        doc_date_obj = None
+        if doc_date:
+            try:
+                from datetime import datetime
+                doc_date_obj = datetime.strptime(doc_date, "%Y-%m-%d").date()
+            except ValueError:
+                pass
 
-            # Convert date string to date object
-            doc_date_obj = None
-            if doc_date:
-                try:
-                    from datetime import datetime
-                    doc_date_obj = datetime.strptime(doc_date, "%Y-%m-%d").date()
-                except ValueError:
-                    pass
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO documents (file_id, file_name, file_type, doc_type,
+                                           owner_company, doc_date, language, confidence, storage_path, checksum)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (file_id) DO UPDATE SET
+                        file_name = EXCLUDED.file_name,
+                        file_type = EXCLUDED.file_type,
+                        doc_type = EXCLUDED.doc_type,
+                        owner_company = EXCLUDED.owner_company,
+                        doc_date = EXCLUDED.doc_date,
+                        language = EXCLUDED.language,
+                        confidence = EXCLUDED.confidence,
+                        storage_path = EXCLUDED.storage_path,
+                        checksum = EXCLUDED.checksum,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                    """,
+                    (file_id, file_name, file_type, doc_type, owner_company,
+                     doc_date_obj, language, confidence, storage_path, checksum)
+                )
+                doc_id = cursor.fetchone()[0]
+                conn.commit()
+                logger.info(f"Saved document: {file_name} (id={doc_id})")
+                return doc_id, False
 
-            cursor.execute(
-                """
-                INSERT INTO documents (file_id, file_name, file_type, doc_type,
-                                       owner_company, doc_date, language, confidence, storage_path, checksum)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (file_id) DO UPDATE SET
-                    file_name = EXCLUDED.file_name,
-                    file_type = EXCLUDED.file_type,
-                    doc_type = EXCLUDED.doc_type,
-                    owner_company = EXCLUDED.owner_company,
-                    doc_date = EXCLUDED.doc_date,
-                    language = EXCLUDED.language,
-                    confidence = EXCLUDED.confidence,
-                    storage_path = EXCLUDED.storage_path,
-                    checksum = EXCLUDED.checksum,
-                    updated_at = CURRENT_TIMESTAMP
-                RETURNING id
-                """,
-                (file_id, file_name, file_type, doc_type, owner_company,
-                 doc_date_obj, language, confidence, storage_path, checksum)
-            )
-            doc_id = cursor.fetchone()[0]
-            conn.commit()
-            logger.info(f"Saved document: {file_name} (id={doc_id})")
-            return doc_id, False
-
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Failed to save document: {e}")
-            raise
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to save document: {e}")
+                raise
 
     def save_chunk(
         self,
@@ -279,54 +317,54 @@ class DatabaseService:
         Returns:
             Chunk ID.
         """
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        has_vector = self.has_vector_support()
 
-        try:
-            if embedding and self.has_vector_support():
-                # Convert embedding list to pgvector format
-                embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
-                cursor.execute(
-                    """
-                    INSERT INTO chunks (document_id, chunk_index, page, section_title,
-                                        text, char_len, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-                    RETURNING id
-                    """,
-                    (document_id, chunk_index, page, section_title, text, char_len, embedding_str)
-                )
-            elif embedding:
-                # Store embedding as JSON text (for non-pgvector databases)
-                import json
-                embedding_json = json.dumps(embedding)
-                cursor.execute(
-                    """
-                    INSERT INTO chunks (document_id, chunk_index, page, section_title,
-                                        text, char_len, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (document_id, chunk_index, page, section_title, text, char_len, embedding_json)
-                )
-            else:
-                cursor.execute(
-                    """
-                    INSERT INTO chunks (document_id, chunk_index, page, section_title,
-                                        text, char_len)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (document_id, chunk_index, page, section_title, text, char_len)
-                )
+        with self._get_cursor() as (cursor, conn):
+            try:
+                if embedding and has_vector:
+                    # Convert embedding list to pgvector format
+                    embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+                    cursor.execute(
+                        """
+                        INSERT INTO chunks (document_id, chunk_index, page, section_title,
+                                            text, char_len, embedding)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
+                        RETURNING id
+                        """,
+                        (document_id, chunk_index, page, section_title, text, char_len, embedding_str)
+                    )
+                elif embedding:
+                    # Store embedding as JSON text (for non-pgvector databases)
+                    import json
+                    embedding_json = json.dumps(embedding)
+                    cursor.execute(
+                        """
+                        INSERT INTO chunks (document_id, chunk_index, page, section_title,
+                                            text, char_len, embedding)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (document_id, chunk_index, page, section_title, text, char_len, embedding_json)
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO chunks (document_id, chunk_index, page, section_title,
+                                            text, char_len)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (document_id, chunk_index, page, section_title, text, char_len)
+                    )
 
-            chunk_id = cursor.fetchone()[0]
-            conn.commit()
-            return chunk_id
+                chunk_id = cursor.fetchone()[0]
+                conn.commit()
+                return chunk_id
 
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Failed to save chunk: {e}")
-            raise
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to save chunk: {e}")
+                raise
 
     def save_chunks_batch(
         self,
@@ -335,7 +373,7 @@ class DatabaseService:
         embeddings: Optional[list[list[float]]] = None,
     ) -> list[int]:
         """
-        Save multiple chunks with embeddings in batch.
+        Save multiple chunks with embeddings in batch using optimized batch INSERT.
 
         Args:
             document_id: Parent document ID.
@@ -345,20 +383,82 @@ class DatabaseService:
         Returns:
             List of chunk IDs.
         """
-        chunk_ids = []
-        for i, chunk in enumerate(chunks):
-            embedding = embeddings[i] if embeddings and i < len(embeddings) else None
-            chunk_id = self.save_chunk(
-                document_id=document_id,
-                chunk_index=chunk.get("chunk_index", i),
-                page=chunk.get("page"),
-                section_title=chunk.get("section_title"),
-                text=chunk.get("text", ""),
-                char_len=chunk.get("char_len", len(chunk.get("text", ""))),
-                embedding=embedding,
-            )
-            chunk_ids.append(chunk_id)
-        return chunk_ids
+        if not chunks:
+            return []
+
+        has_vector = self.has_vector_support()
+
+        with self._get_cursor() as (cursor, conn):
+            try:
+                chunk_ids = []
+
+                if embeddings and has_vector:
+                    # Batch INSERT with embeddings using execute_values for better performance
+                    from psycopg2.extras import execute_values
+
+                    # Prepare data for batch insert
+                    values = []
+                    for i, chunk in enumerate(chunks):
+                        embedding = embeddings[i] if i < len(embeddings) else None
+                        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]" if embedding else None
+                        values.append((
+                            document_id,
+                            chunk.get("chunk_index", i),
+                            chunk.get("page"),
+                            chunk.get("section_title"),
+                            chunk.get("text", ""),
+                            chunk.get("char_len", len(chunk.get("text", ""))),
+                            embedding_str,
+                        ))
+
+                    # Use execute_values for efficient batch insert
+                    result = execute_values(
+                        cursor,
+                        """
+                        INSERT INTO chunks (document_id, chunk_index, page, section_title, text, char_len, embedding)
+                        VALUES %s
+                        RETURNING id
+                        """,
+                        values,
+                        template="(%s, %s, %s, %s, %s, %s, %s::vector)",
+                        fetch=True,
+                    )
+                    chunk_ids = [row[0] for row in result]
+                else:
+                    # Batch INSERT without embeddings
+                    from psycopg2.extras import execute_values
+
+                    values = []
+                    for i, chunk in enumerate(chunks):
+                        values.append((
+                            document_id,
+                            chunk.get("chunk_index", i),
+                            chunk.get("page"),
+                            chunk.get("section_title"),
+                            chunk.get("text", ""),
+                            chunk.get("char_len", len(chunk.get("text", ""))),
+                        ))
+
+                    result = execute_values(
+                        cursor,
+                        """
+                        INSERT INTO chunks (document_id, chunk_index, page, section_title, text, char_len)
+                        VALUES %s
+                        RETURNING id
+                        """,
+                        values,
+                        fetch=True,
+                    )
+                    chunk_ids = [row[0] for row in result]
+
+                conn.commit()
+                logger.info(f"Batch saved {len(chunk_ids)} chunks for document {document_id}")
+                return chunk_ids
+
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to batch save chunks: {e}")
+                raise
 
     def _extract_keywords(self, query: str) -> list[str]:
         """Extract keywords from query text, removing particles and stop words."""
@@ -431,9 +531,6 @@ class DatabaseService:
         Returns:
             List of SearchResult objects sorted by relevance.
         """
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
         try:
             keywords = self._extract_keywords(query)
             logger.info(f"Full-text search: query='{query}', keywords={keywords}")
@@ -445,68 +542,69 @@ class DatabaseService:
             # Fetch more results for re-ranking
             fetch_limit = limit * 3
 
-            cursor.execute(
-                f"""
-                SELECT
-                    c.id as chunk_id,
-                    c.document_id,
-                    c.chunk_index,
-                    c.page,
-                    c.section_title,
-                    c.text,
-                    c.char_len,
-                    d.id as doc_id,
-                    d.file_id,
-                    d.file_name,
-                    d.file_type,
-                    d.doc_type,
-                    d.owner_company,
-                    d.doc_date,
-                    d.language,
-                    d.confidence,
-                    d.storage_path,
-                    d.checksum
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE {ilike_conditions}
-                LIMIT %s
-                """,
-                (*ilike_params, fetch_limit)
-            )
-
-            results = []
-            for row in cursor.fetchall():
-                # Calculate similarity based on keyword matches
-                similarity = self._calculate_keyword_similarity(row["text"], keywords)
-
-                chunk = ChunkRecord(
-                    id=row["chunk_id"],
-                    document_id=row["document_id"],
-                    chunk_index=row["chunk_index"],
-                    page=row["page"],
-                    section_title=row["section_title"],
-                    text=row["text"],
-                    char_len=row["char_len"],
-                    similarity=similarity,
+            with self._get_cursor(dict_cursor=True) as (cursor, conn):
+                cursor.execute(
+                    f"""
+                    SELECT
+                        c.id as chunk_id,
+                        c.document_id,
+                        c.chunk_index,
+                        c.page,
+                        c.section_title,
+                        c.text,
+                        c.char_len,
+                        d.id as doc_id,
+                        d.file_id,
+                        d.file_name,
+                        d.file_type,
+                        d.doc_type,
+                        d.owner_company,
+                        d.doc_date,
+                        d.language,
+                        d.confidence,
+                        d.storage_path,
+                        d.checksum
+                    FROM chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE {ilike_conditions}
+                    LIMIT %s
+                    """,
+                    (*ilike_params, fetch_limit)
                 )
-                document = DocumentRecord(
-                    id=row["doc_id"],
-                    file_id=row["file_id"],
-                    file_name=row["file_name"],
-                    file_type=row.get("file_type"),
-                    doc_type=row.get("doc_type"),
-                    owner_company=row.get("owner_company"),
-                    doc_date=row.get("doc_date"),
-                    language=row.get("language"),
-                    confidence=row.get("confidence"),
-                    storage_path=row.get("storage_path"),
-                    checksum=row.get("checksum"),
-                )
-                results.append(SearchResult(
-                    chunk=chunk,
-                    document=document,
-                    similarity=similarity,
-                ))
+
+                results = []
+                for row in cursor.fetchall():
+                    # Calculate similarity based on keyword matches
+                    similarity = self._calculate_keyword_similarity(row["text"], keywords)
+
+                    chunk = ChunkRecord(
+                        id=row["chunk_id"],
+                        document_id=row["document_id"],
+                        chunk_index=row["chunk_index"],
+                        page=row["page"],
+                        section_title=row["section_title"],
+                        text=row["text"],
+                        char_len=row["char_len"],
+                        similarity=similarity,
+                    )
+                    document = DocumentRecord(
+                        id=row["doc_id"],
+                        file_id=row["file_id"],
+                        file_name=row["file_name"],
+                        file_type=row.get("file_type"),
+                        doc_type=row.get("doc_type"),
+                        owner_company=row.get("owner_company"),
+                        doc_date=row.get("doc_date"),
+                        language=row.get("language"),
+                        confidence=row.get("confidence"),
+                        storage_path=row.get("storage_path"),
+                        checksum=row.get("checksum"),
+                    )
+                    results.append(SearchResult(
+                        chunk=chunk,
+                        document=document,
+                        similarity=similarity,
+                    ))
 
             # Sort by similarity score (descending) and return top results
             results.sort(key=lambda x: x.similarity, reverse=True)
@@ -520,13 +618,23 @@ class DatabaseService:
             return []
 
     def has_vector_support(self) -> bool:
-        """Check if pgvector extension is available."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        """Check if pgvector extension is available (cached)."""
+        # Return cached result if available
+        if self._vector_support_cached is not None:
+            return self._vector_support_cached
+
         try:
-            cursor.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
-            return cursor.fetchone() is not None
-        except Exception:
+            with self._get_cursor() as (cursor, conn):
+                cursor.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+                self._vector_support_cached = cursor.fetchone() is not None
+                if self._vector_support_cached:
+                    logger.info("pgvector extension is available")
+                else:
+                    logger.info("pgvector extension is NOT available, using full-text search fallback")
+                return self._vector_support_cached
+        except Exception as e:
+            logger.warning(f"Failed to check pgvector support: {e}")
+            self._vector_support_cached = False
             return False
 
     def search_similar_chunks(
@@ -556,75 +664,73 @@ class DatabaseService:
                 return self.search_chunks_fulltext(query_text, limit)
             return []
 
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
         try:
             embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
-            # Use cosine similarity (1 - cosine_distance)
-            cursor.execute(
-                """
-                SELECT
-                    c.id as chunk_id,
-                    c.document_id,
-                    c.chunk_index,
-                    c.page,
-                    c.section_title,
-                    c.text,
-                    c.char_len,
-                    1 - (c.embedding <=> %s::vector) as similarity,
-                    d.id as doc_id,
-                    d.file_id,
-                    d.file_name,
-                    d.file_type,
-                    d.doc_type,
-                    d.owner_company,
-                    d.doc_date,
-                    d.language,
-                    d.confidence,
-                    d.storage_path,
-                    d.checksum
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.embedding IS NOT NULL
-                AND 1 - (c.embedding <=> %s::vector) > %s
-                ORDER BY c.embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (embedding_str, embedding_str, similarity_threshold, embedding_str, limit)
-            )
+            with self._get_cursor(dict_cursor=True) as (cursor, conn):
+                # Use cosine similarity (1 - cosine_distance)
+                cursor.execute(
+                    """
+                    SELECT
+                        c.id as chunk_id,
+                        c.document_id,
+                        c.chunk_index,
+                        c.page,
+                        c.section_title,
+                        c.text,
+                        c.char_len,
+                        1 - (c.embedding <=> %s::vector) as similarity,
+                        d.id as doc_id,
+                        d.file_id,
+                        d.file_name,
+                        d.file_type,
+                        d.doc_type,
+                        d.owner_company,
+                        d.doc_date,
+                        d.language,
+                        d.confidence,
+                        d.storage_path,
+                        d.checksum
+                    FROM chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE c.embedding IS NOT NULL
+                    AND 1 - (c.embedding <=> %s::vector) > %s
+                    ORDER BY c.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (embedding_str, embedding_str, similarity_threshold, embedding_str, limit)
+                )
 
-            results = []
-            for row in cursor.fetchall():
-                chunk = ChunkRecord(
-                    id=row["chunk_id"],
-                    document_id=row["document_id"],
-                    chunk_index=row["chunk_index"],
-                    page=row["page"],
-                    section_title=row["section_title"],
-                    text=row["text"],
-                    char_len=row["char_len"],
-                    similarity=row["similarity"],
-                )
-                document = DocumentRecord(
-                    id=row["doc_id"],
-                    file_id=row["file_id"],
-                    file_name=row["file_name"],
-                    file_type=row.get("file_type"),
-                    doc_type=row.get("doc_type"),
-                    owner_company=row.get("owner_company"),
-                    doc_date=row.get("doc_date"),
-                    language=row.get("language"),
-                    confidence=row.get("confidence"),
-                    storage_path=row.get("storage_path"),
-                    checksum=row.get("checksum"),
-                )
-                results.append(SearchResult(
-                    chunk=chunk,
-                    document=document,
-                    similarity=row["similarity"],
-                ))
+                results = []
+                for row in cursor.fetchall():
+                    chunk = ChunkRecord(
+                        id=row["chunk_id"],
+                        document_id=row["document_id"],
+                        chunk_index=row["chunk_index"],
+                        page=row["page"],
+                        section_title=row["section_title"],
+                        text=row["text"],
+                        char_len=row["char_len"],
+                        similarity=row["similarity"],
+                    )
+                    document = DocumentRecord(
+                        id=row["doc_id"],
+                        file_id=row["file_id"],
+                        file_name=row["file_name"],
+                        file_type=row.get("file_type"),
+                        doc_type=row.get("doc_type"),
+                        owner_company=row.get("owner_company"),
+                        doc_date=row.get("doc_date"),
+                        language=row.get("language"),
+                        confidence=row.get("confidence"),
+                        storage_path=row.get("storage_path"),
+                        checksum=row.get("checksum"),
+                    )
+                    results.append(SearchResult(
+                        chunk=chunk,
+                        document=document,
+                        similarity=row["similarity"],
+                    ))
 
             logger.info(f"Vector search found {len(results)} results")
             return results
@@ -702,119 +808,109 @@ class DatabaseService:
 
     def get_document_by_file_id(self, file_id: str) -> Optional[DocumentRecord]:
         """Get document by file_id."""
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-        cursor.execute(
-            "SELECT * FROM documents WHERE file_id = %s",
-            (file_id,)
-        )
-        row = cursor.fetchone()
-
-        if row:
-            return DocumentRecord(
-                id=row["id"],
-                file_id=row["file_id"],
-                file_name=row["file_name"],
-                file_type=row.get("file_type"),
-                doc_type=row.get("doc_type"),
-                owner_company=row.get("owner_company"),
-                doc_date=row.get("doc_date"),
-                language=row.get("language"),
-                confidence=row.get("confidence"),
-                storage_path=row.get("storage_path"),
-                checksum=row.get("checksum"),
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                "SELECT * FROM documents WHERE file_id = %s",
+                (file_id,)
             )
-        return None
+            row = cursor.fetchone()
+
+            if row:
+                return DocumentRecord(
+                    id=row["id"],
+                    file_id=row["file_id"],
+                    file_name=row["file_name"],
+                    file_type=row.get("file_type"),
+                    doc_type=row.get("doc_type"),
+                    owner_company=row.get("owner_company"),
+                    doc_date=row.get("doc_date"),
+                    language=row.get("language"),
+                    confidence=row.get("confidence"),
+                    storage_path=row.get("storage_path"),
+                    checksum=row.get("checksum"),
+                )
+            return None
 
     def get_document_by_id(self, document_id: int) -> Optional[DocumentRecord]:
         """Get document by ID."""
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-        cursor.execute(
-            "SELECT * FROM documents WHERE id = %s",
-            (document_id,)
-        )
-        row = cursor.fetchone()
-
-        if row:
-            return DocumentRecord(
-                id=row["id"],
-                file_id=row["file_id"],
-                file_name=row["file_name"],
-                file_type=row.get("file_type"),
-                doc_type=row.get("doc_type"),
-                owner_company=row.get("owner_company"),
-                doc_date=row.get("doc_date"),
-                language=row.get("language"),
-                confidence=row.get("confidence"),
-                storage_path=row.get("storage_path"),
-                checksum=row.get("checksum"),
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                "SELECT * FROM documents WHERE id = %s",
+                (document_id,)
             )
-        return None
+            row = cursor.fetchone()
+
+            if row:
+                return DocumentRecord(
+                    id=row["id"],
+                    file_id=row["file_id"],
+                    file_name=row["file_name"],
+                    file_type=row.get("file_type"),
+                    doc_type=row.get("doc_type"),
+                    owner_company=row.get("owner_company"),
+                    doc_date=row.get("doc_date"),
+                    language=row.get("language"),
+                    confidence=row.get("confidence"),
+                    storage_path=row.get("storage_path"),
+                    checksum=row.get("checksum"),
+                )
+            return None
 
     def get_chunks_by_document_id(self, document_id: int) -> list[ChunkRecord]:
         """Get all chunks for a document."""
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-        cursor.execute(
-            "SELECT * FROM chunks WHERE document_id = %s ORDER BY chunk_index",
-            (document_id,)
-        )
-
-        return [
-            ChunkRecord(
-                id=row["id"],
-                document_id=row["document_id"],
-                chunk_index=row["chunk_index"],
-                page=row["page"],
-                section_title=row["section_title"],
-                text=row["text"],
-                char_len=row["char_len"],
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                "SELECT * FROM chunks WHERE document_id = %s ORDER BY chunk_index",
+                (document_id,)
             )
-            for row in cursor.fetchall()
-        ]
+
+            return [
+                ChunkRecord(
+                    id=row["id"],
+                    document_id=row["document_id"],
+                    chunk_index=row["chunk_index"],
+                    page=row["page"],
+                    section_title=row["section_title"],
+                    text=row["text"],
+                    char_len=row["char_len"],
+                )
+                for row in cursor.fetchall()
+            ]
 
     def delete_document(self, file_id: str) -> bool:
         """Delete document and all related data."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    "DELETE FROM documents WHERE file_id = %s RETURNING id",
+                    (file_id,)
+                )
+                deleted = cursor.fetchone() is not None
+                conn.commit()
+                return deleted
 
-        try:
-            cursor.execute(
-                "DELETE FROM documents WHERE file_id = %s RETURNING id",
-                (file_id,)
-            )
-            deleted = cursor.fetchone() is not None
-            conn.commit()
-            return deleted
-
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Failed to delete document: {e}")
-            raise
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to delete document: {e}")
+                raise
 
     def get_stats(self) -> dict:
-        """Get database statistics."""
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        """Get database statistics using a single optimized query."""
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            # Use a single query with subqueries for better performance
+            cursor.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM documents) as doc_count,
+                    (SELECT COUNT(*) FROM chunks) as chunk_count,
+                    (SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL) as embedded_count
+            """)
+            row = cursor.fetchone()
 
-        cursor.execute("SELECT COUNT(*) as count FROM documents")
-        doc_count = cursor.fetchone()["count"]
-
-        cursor.execute("SELECT COUNT(*) as count FROM chunks")
-        chunk_count = cursor.fetchone()["count"]
-
-        cursor.execute("SELECT COUNT(*) as count FROM chunks WHERE embedding IS NOT NULL")
-        embedded_count = cursor.fetchone()["count"]
-
-        return {
-            "documents": doc_count,
-            "chunks": chunk_count,
-            "chunks_with_embeddings": embedded_count,
-        }
+            return {
+                "documents": row["doc_count"],
+                "chunks": row["chunk_count"],
+                "chunks_with_embeddings": row["embedded_count"],
+            }
 
 
 # Global instance

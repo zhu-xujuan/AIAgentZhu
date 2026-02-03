@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+# Configuration from environment
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))  # Default 50MB
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+EMBEDDING_WARMUP_ENABLED = os.getenv("EMBEDDING_WARMUP_ENABLED", "true").lower() == "true"
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,7 +59,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
     global ai_client, ollama_client, llm_config, db_service
 
+    import time
+
     # Startup
+    startup_start = time.time()
     llm_config = get_llm_config()
 
     if llm_config.enabled:
@@ -73,6 +83,19 @@ async def lifespan(app: FastAPI):
         health = await ai_client.health_check()
         if health.available:
             logger.info(f"AI service connected ({health.provider}). Available models: {health.models}")
+
+            # Warmup embedding model to avoid cold start delays
+            if EMBEDDING_WARMUP_ENABLED:
+                logger.info("Warming up embedding model...")
+                warmup_start = time.time()
+                try:
+                    warmup_result = await ai_client.embed("warmup test")
+                    if warmup_result.success:
+                        logger.info(f"Embedding model warmed up successfully in {time.time() - warmup_start:.2f}s")
+                    else:
+                        logger.warning(f"Embedding warmup failed: {warmup_result.error}")
+                except Exception as e:
+                    logger.warning(f"Embedding warmup error: {e}")
         else:
             logger.warning(f"AI service not available: {health.error}")
     else:
@@ -84,11 +107,19 @@ async def lifespan(app: FastAPI):
         if db_service:
             stats = db_service.get_stats()
             logger.info(f"Database connected. Stats: {stats}")
+
+            # Check and log pgvector support status
+            if db_service.has_vector_support():
+                logger.info("pgvector extension is available - vector search enabled")
+            else:
+                logger.warning("pgvector extension NOT available - using full-text search fallback")
         else:
             logger.warning("Database service not available. QA features will be disabled.")
     except Exception as e:
         logger.warning(f"Failed to connect to database: {e}. QA features will be disabled.")
         db_service = None
+
+    logger.info(f"Startup completed in {time.time() - startup_start:.2f}s")
 
     yield
 
@@ -108,14 +139,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS設定
+# CORS設定 (configurable via CORS_ORIGINS environment variable)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept"],
 )
+logger.info(f"CORS configured for origins: {CORS_ORIGINS}")
 
 # Storage instance - use project root data directory
 storage = LocalStorage("../data/uploads")
@@ -148,6 +180,7 @@ class QualityCheckRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
+    mode: Optional[str] = "standard"  # "fast", "standard", "accurate"
 
 
 class FormatRequest(BaseModel):
@@ -180,13 +213,16 @@ async def debug_database():
             port=int(os.getenv("POSTGRES_PORT", "5432")),
             database=os.getenv("POSTGRES_DB", "aiagent"),
             user=os.getenv("POSTGRES_USER", "postgres"),
-            password=os.getenv("POSTGRES_PASSWORD", "aiagent123"),
+            password=os.getenv("POSTGRES_PASSWORD", ""),
             connect_timeout=3,
         )
         cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        conn.close()
-        result["direct_connection"] = "success"
+        try:
+            cursor.execute("SELECT 1")
+            result["direct_connection"] = "success"
+        finally:
+            cursor.close()
+            conn.close()
     except Exception as e:
         result["direct_connection"] = f"failed: {str(e)}"
 
@@ -307,7 +343,22 @@ async def upload_file(file: UploadFile = File(...)):
     Upload a file to local storage.
     Returns file_id and metadata.
     """
+    # Check file size before reading (if available)
+    if file.size and file.size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {file.size / (1024*1024):.1f}MB. Maximum allowed: {MAX_FILE_SIZE_MB}MB"
+        )
+
     content = await file.read()
+
+    # Validate file size after reading
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {len(content) / (1024*1024):.1f}MB. Maximum allowed: {MAX_FILE_SIZE_MB}MB"
+        )
+
     result = storage.upload(file.filename, content, file.content_type)
 
     if not result.success:
@@ -707,9 +758,24 @@ async def ingest_document(file: UploadFile = File(...)):
             detail=f"Unsupported content type: {content_type}. Only text-based files are supported."
         )
 
+    # Check file size before reading (if available)
+    if file.size and file.size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {file.size / (1024*1024):.1f}MB. Maximum allowed: {MAX_FILE_SIZE_MB}MB"
+        )
+
     # Upload
     step_start = time.time()
     content = await file.read()
+
+    # Validate file size after reading (in case size wasn't available)
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {len(content) / (1024*1024):.1f}MB. Maximum allowed: {MAX_FILE_SIZE_MB}MB"
+        )
+
     logger.info(f"[INGEST] File read: {len(content)} bytes, took {time.time() - step_start:.2f}s")
 
     step_start = time.time()
@@ -1032,14 +1098,148 @@ async def query_documents(request: QueryRequest):
         # Route the question
         response = await router.route(request.question, qa_handler=qa_handler)
 
+        # Calculate search time
+        search_time = time.time() - query_start
+        response.search_time_seconds = round(search_time, 2)
+
         # Log the routing result
-        logger.info(f"Query routed: intent={response.intent}, search_mode={response.search_mode}")
+        logger.info(f"Query routed: intent={response.intent}, search_mode={response.search_mode}, search_time={search_time:.2f}s")
 
         return router_response_to_dict(response)
 
     except Exception as e:
         logger.error(f"Query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/chat/stream")
+async def chat_stream(request: QueryRequest):
+    """
+    Streaming chat endpoint for real-time responses.
+    Uses Server-Sent Events (SSE) format compatible with Vercel AI SDK.
+
+    Modes:
+    - fast: Skip query expansion, top_k=3 (fastest, ~70% accuracy)
+    - standard: Query expansion, top_k=5 (balanced)
+    - accurate: Query expansion, top_k=7 (highest accuracy)
+    """
+    import time
+    import json
+    from src.agents.qa_agent import (
+        expand_query_with_llm,
+        extract_search_keywords,
+        deduplicate_results,
+        format_context,
+        QA_SYSTEM_PROMPT,
+        QA_PROMPT_TEMPLATE,
+    )
+
+    query_start = time.time()
+    question = request.question
+    mode = request.mode or "standard"
+
+    # Mode configuration
+    MODE_CONFIG = {
+        "fast": {"use_expansion": False, "top_k": 3},
+        "standard": {"use_expansion": True, "top_k": 5},
+        "accurate": {"use_expansion": True, "top_k": 7},
+    }
+    config = MODE_CONFIG.get(mode, MODE_CONFIG["standard"])
+
+    logger.info(f"[STREAM] === Starting streaming query (mode={mode}): '{question[:50]}...' ===")
+
+    async def generate_stream():
+        """Generator for SSE streaming response."""
+        try:
+            # Check services
+            if not db_service:
+                yield f"data: {json.dumps({'error': 'Database not available'})}\n\n"
+                return
+            if not ollama_client:
+                yield f"data: {json.dumps({'error': 'LLM not available'})}\n\n"
+                return
+
+            # Step 1: Query expansion (skip in fast mode)
+            search_query = question
+            if config["use_expansion"]:
+                step_start = time.time()
+                expanded_keywords = await expand_query_with_llm(question, ollama_client)
+                search_query = question + " " + " ".join(expanded_keywords)
+                logger.info(f"[STREAM] Query expansion: {time.time() - step_start:.2f}s")
+            else:
+                logger.info(f"[STREAM] Query expansion: SKIPPED (fast mode)")
+
+            # Step 2: Generate embedding
+            step_start = time.time()
+            embed_result = await ollama_client.embed(question)
+            query_embedding = embed_result.embedding if embed_result.success else None
+            logger.info(f"[STREAM] Embedding: {time.time() - step_start:.2f}s")
+
+            # Step 3: Search
+            step_start = time.time()
+            search_results = db_service.search_hybrid(
+                query_text=search_query,
+                query_embedding=query_embedding,
+                limit=config["top_k"],
+                similarity_threshold=0.3,
+            )
+            search_results = deduplicate_results(search_results)
+            logger.info(f"[STREAM] Search: {time.time() - step_start:.2f}s, found {len(search_results)} results")
+
+            # Prepare sources metadata
+            sources = [
+                {
+                    "document_name": r.document.file_name,
+                    "chunk_text": r.chunk.text[:200] + "..." if len(r.chunk.text) > 200 else r.chunk.text,
+                    "similarity": round(r.similarity, 3),
+                }
+                for r in search_results
+            ]
+
+            # Send sources first
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+
+            if not search_results:
+                yield f"data: {json.dumps({'type': 'text', 'text': '文書内に該当する情報が見つかりませんでした。'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'search_time': round(time.time() - query_start, 2)})}\n\n"
+                return
+
+            # Step 4: Format context and generate response
+            context = format_context(search_results)
+            prompt = QA_PROMPT_TEMPLATE.format(context=context, question=question)
+
+            # Step 5: Stream LLM response
+            logger.info(f"[STREAM] Starting LLM generation...")
+            async for chunk in ollama_client.generate_stream(
+                prompt=prompt,
+                system=QA_SYSTEM_PROMPT,
+                temperature=0.3,
+            ):
+                yield f"data: {json.dumps({'type': 'text', 'text': chunk})}\n\n"
+
+            # Calculate confidence
+            top_similarity = search_results[0].similarity if search_results else 0
+            avg_similarity = sum(r.similarity for r in search_results) / len(search_results) if search_results else 0
+            confidence = round(min(1.0, (top_similarity * 0.6) + (avg_similarity * 0.4)), 2)
+
+            # Send completion
+            search_time = round(time.time() - query_start, 2)
+            yield f"data: {json.dumps({'type': 'done', 'confidence': confidence, 'has_answer': True, 'search_time': search_time, 'mode': mode})}\n\n"
+            logger.info(f"[STREAM] Completed in {search_time}s (mode={mode})")
+
+        except Exception as e:
+            logger.error(f"[STREAM] Error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 if __name__ == "__main__":

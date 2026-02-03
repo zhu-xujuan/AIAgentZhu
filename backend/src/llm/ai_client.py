@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 
@@ -390,6 +390,84 @@ class AIClient:
             success=True,
             error=None,
         )
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        system: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        """
+        Generate text with streaming response.
+
+        Args:
+            prompt: The input prompt.
+            model: Model to use (defaults to instance model).
+            temperature: Sampling temperature (0.0-1.0).
+            system: Optional system prompt.
+
+        Yields:
+            Text chunks as they are generated.
+        """
+        model = model or self.model
+
+        try:
+            if self.provider == AIProvider.OLLAMA:
+                async for chunk in self._generate_stream_ollama(
+                    prompt, model, temperature, system
+                ):
+                    yield chunk
+            else:
+                # Fallback to non-streaming for other providers
+                result = await self.generate(prompt, model, False, temperature, system)
+                if result.success:
+                    yield result.text
+                else:
+                    yield f"Error: {result.error}"
+
+        except Exception as e:
+            logger.error(f"Streaming generate error: {e}")
+            yield f"Error: {str(e)}"
+
+    async def _generate_stream_ollama(
+        self,
+        prompt: str,
+        model: str,
+        temperature: float,
+        system: Optional[str],
+    ) -> AsyncIterator[str]:
+        """Generate streaming response using Ollama API."""
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {"temperature": temperature},
+        }
+
+        if system:
+            payload["system"] = system
+
+        # Use a longer timeout for streaming
+        timeout = httpx.Timeout(300.0, connect=10.0)
+
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=timeout,
+            headers=self._get_headers(),
+        ) as client:
+            async with client.stream("POST", "/api/generate", json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if "response" in data:
+                                yield data["response"]
+                            if data.get("done", False):
+                                break
+                        except json.JSONDecodeError:
+                            continue
 
     async def generate_json(
         self,

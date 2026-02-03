@@ -48,6 +48,7 @@ class RouterResponse:
     search_mode: str  # "metadata", "vector", "hybrid", "direct"
     intent: str
     error: Optional[str] = None
+    search_time_seconds: Optional[float] = None  # 検索時間（秒）
 
 
 # ============================================================
@@ -402,4 +403,5 @@ def router_response_to_dict(response: RouterResponse) -> dict:
         "search_mode": response.search_mode,
         "intent": response.intent,
         "error": response.error,
+        "search_time_seconds": response.search_time_seconds,
     }
