@@ -12,6 +12,7 @@ import {
   Plus,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
 
@@ -26,8 +27,27 @@ export type Slide = {
   title: string;
   bullets: string[];
   diagram_mermaid?: string;
+  table?: SlideTable | null;
+  image_url?: string;
+  image_data_url?: string;
+  chart?: SlideChart | null;
   speaker_notes?: string;
   citations?: SlideCitation[];
+};
+
+export type SlideTable = {
+  headers?: string[];
+  rows?: string[][];
+};
+
+export type SlideChart = {
+  type?: 'bar' | 'line' | 'pie';
+  title?: string;
+  labels?: string[];
+  datasets?: Array<{
+    label?: string;
+    data?: number[];
+  }>;
 };
 
 export type SlideDeck = {
@@ -49,6 +69,80 @@ function textareaToBullets(text: string) {
     .filter(Boolean);
 }
 
+function tableToCsv(table?: SlideTable | null) {
+  if (!table) return '';
+  const lines: string[] = [];
+  const headers = table.headers || [];
+  const rows = table.rows || [];
+  if (headers.length > 0) lines.push(headers.join(', '));
+  rows.forEach((r) => lines.push((r || []).join(', ')));
+  return lines.join('\n');
+}
+
+function csvToTable(text: string): SlideTable | null {
+  const lines = (text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return null;
+  const parsed = lines.map((l) => l.split(',').map((c) => c.trim()));
+  const headers = parsed[0] || [];
+  const rows = parsed.slice(1);
+  const hasData =
+    headers.some((h) => h.length > 0) || rows.some((r) => r.some((c) => c.length > 0));
+  return hasData ? { headers, rows } : null;
+}
+
+function hasTableData(table?: SlideTable | null) {
+  if (!table) return false;
+  return (table.headers && table.headers.length > 0) || (table.rows && table.rows.length > 0);
+}
+
+function getSlideImageSrc(slide?: Slide | null) {
+  if (!slide) return '';
+  return slide.image_data_url || slide.image_url || '';
+}
+
+function chartToJson(chart?: SlideChart | null) {
+  if (!chart) return '';
+  return JSON.stringify(chart, null, 2);
+}
+
+function jsonToChart(text: string): SlideChart | null {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object') return parsed as SlideChart;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function chartToQuickchartUrl(chart?: SlideChart | null) {
+  if (!chart || !chart.type) return '';
+  const labels = Array.isArray(chart.labels) ? chart.labels : [];
+  const datasets = Array.isArray(chart.datasets) ? chart.datasets : [];
+  if (labels.length === 0 || datasets.length === 0) return '';
+  const config = {
+    type: chart.type,
+    data: { labels, datasets },
+    options: {
+      plugins: {
+        title: {
+          display: !!chart.title,
+          text: chart.title || '',
+        },
+        legend: { display: datasets.length > 1 },
+      },
+      responsive: true,
+      maintainAspectRatio: false,
+    },
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}`;
+}
+
 function deckToMarkdown(deck: SlideDeck) {
   const lines: string[] = [];
   lines.push(`# ${deck.title || 'スライド資料'}`);
@@ -60,6 +154,26 @@ function deckToMarkdown(deck: SlideDeck) {
   deck.slides.forEach((s, idx) => {
     lines.push(`## ${idx + 1}. ${s.title || 'Slide'}`);
     (s.bullets || []).forEach((b) => lines.push(`- ${b}`));
+    if (hasTableData(s.table)) {
+      const headers = s.table?.headers || [];
+      const rows = s.table?.rows || [];
+      if (headers.length > 0) {
+        lines.push('');
+        lines.push(`| ${headers.join(' | ')} |`);
+        lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
+      }
+      rows.forEach((r) => {
+        lines.push(`| ${(r || []).join(' | ')} |`);
+      });
+    }
+    if (s.image_url?.trim()) {
+      lines.push('');
+      lines.push(`Image: ${s.image_url.trim()}`);
+    }
+    if (s.chart?.type) {
+      lines.push('');
+      lines.push(`Chart: ${s.chart.type}${s.chart.title ? ` (${s.chart.title})` : ''}`);
+    }
     if (s.speaker_notes?.trim()) {
       lines.push('');
       lines.push(`> Notes: ${s.speaker_notes.trim().replace(/\n/g, ' ')}`);
@@ -184,6 +298,16 @@ export function SlideStudio({
   const exportSlideRef = useRef<HTMLDivElement>(null);
   const exportPngCacheRef = useRef<{ fingerprint: string; pngs: string[] } | null>(null);
   const selectedSlide = useMemo(() => deck.slides[selectedIndex], [deck.slides, selectedIndex]);
+  const [chartDraft, setChartDraft] = useState('');
+  const chartUrl = useMemo(
+    () => chartToQuickchartUrl(selectedSlide?.chart || null),
+    [selectedSlide?.chart]
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setChartDraft(chartToJson(selectedSlide?.chart || null));
+  }, [open, selectedSlide?.id, selectedSlide?.chart]);
 
   useEffect(() => {
     if (!open) return;
@@ -210,6 +334,20 @@ export function SlideStudio({
     const slides = deck.slides.slice();
     slides[index] = { ...slides[index], ...patch };
     onDeckChange({ ...deck, slides });
+  };
+
+  const handleImageFile = (file: File | null) => {
+    if (!file || !selectedSlide) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (!result) return;
+      updateSlide(selectedIndex, {
+        image_data_url: result,
+        image_url: '',
+      });
+    };
+    reader.readAsDataURL(file);
   };
 
   const addSlide = () => {
@@ -295,6 +433,7 @@ export function SlideStudio({
       const canvas = await html2canvas(el, {
         backgroundColor: '#ffffff',
         scale: 2,
+        useCORS: true,
       });
       pngs.push(canvas.toDataURL('image/png'));
     }
@@ -373,6 +512,12 @@ export function SlideStudio({
   };
 
   const slideForExport = deck.slides[exportIndex];
+  const exportTable = slideForExport?.table;
+  const exportImage = getSlideImageSrc(slideForExport);
+  const exportChartUrl = chartToQuickchartUrl(slideForExport?.chart || null);
+  const showExportImage = !exportDiagramSvg && !!exportImage;
+  const showExportChart = !exportDiagramSvg && !exportImage && !!exportChartUrl;
+  const showExportTable = !exportDiagramSvg && !exportImage && !exportChartUrl && hasTableData(exportTable);
 
   return (
     <div
@@ -591,6 +736,52 @@ export function SlideStudio({
                       <li className="text-muted-foreground">（内容なし）</li>
                     )}
                   </ul>
+                  {getSlideImageSrc(selectedSlide) && (
+                    <div className="mt-3 rounded-lg border border-border bg-background p-2">
+                      <img
+                        src={getSlideImageSrc(selectedSlide)}
+                        alt="Slide visual"
+                        className="max-h-52 w-auto object-contain"
+                      />
+                    </div>
+                  )}
+                  {chartUrl && (
+                    <div className="mt-3 rounded-lg border border-border bg-background p-2">
+                      <img
+                        src={chartUrl}
+                        alt="Slide chart"
+                        className="max-h-52 w-auto object-contain"
+                      />
+                    </div>
+                  )}
+                  {hasTableData(selectedSlide.table) && (
+                    <div className="mt-3 overflow-auto">
+                      <table className="w-full text-xs border border-border">
+                        {selectedSlide.table?.headers && selectedSlide.table.headers.length > 0 && (
+                          <thead className="bg-muted/40">
+                            <tr>
+                              {selectedSlide.table.headers.map((h, i) => (
+                                <th key={i} className="text-left font-medium px-2 py-1 border border-border">
+                                  {h}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                        )}
+                        <tbody>
+                          {(selectedSlide.table?.rows || []).map((row, rIdx) => (
+                            <tr key={rIdx}>
+                              {(row || []).map((cell, cIdx) => (
+                                <td key={cIdx} className="px-2 py-1 border border-border">
+                                  {cell}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -614,6 +805,77 @@ export function SlideStudio({
                         className="w-full h-44 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/40"
                         disabled={busy || exporting !== null}
                       />
+                    </div>
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Table (CSV)</div>
+                      <textarea
+                        value={tableToCsv(selectedSlide.table)}
+                        onChange={(e) =>
+                          updateSlide(selectedIndex, { table: csvToTable(e.target.value) })
+                        }
+                        className="w-full h-28 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/40 font-mono"
+                        placeholder="Header1, Header2\nValue1, Value2"
+                        disabled={busy || exporting !== null}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Image (URL or Upload)</div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={selectedSlide.image_url || ''}
+                          onChange={(e) =>
+                            updateSlide(selectedIndex, {
+                              image_url: e.target.value,
+                              image_data_url: '',
+                            })
+                          }
+                          className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/40"
+                          placeholder="https://example.com/image.png"
+                          disabled={busy || exporting !== null}
+                        />
+                        <label className={cn(
+                          'inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs hover:bg-accent transition-colors cursor-pointer',
+                          (busy || exporting !== null) && 'opacity-50 cursor-not-allowed'
+                        )}>
+                          <Upload className="w-3.5 h-3.5" />
+                          Upload
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            disabled={busy || exporting !== null}
+                            onChange={(e) => handleImageFile(e.target.files?.[0] || null)}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateSlide(selectedIndex, { image_url: '', image_data_url: '' })
+                          }
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs hover:bg-accent transition-colors"
+                          disabled={busy || exporting !== null}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-medium text-muted-foreground mb-1">Chart (JSON)</div>
+                      <textarea
+                        value={chartDraft}
+                        onChange={(e) => setChartDraft(e.target.value)}
+                        onBlur={() => {
+                          const next = jsonToChart(chartDraft);
+                          if (next) updateSlide(selectedIndex, { chart: next });
+                        }}
+                        className="w-full h-28 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/40 font-mono"
+                        placeholder='{"type":"bar","title":"例","labels":["A","B"],"datasets":[{"label":"値","data":[10,20]}]}'
+                        disabled={busy || exporting !== null}
+                      />
+                      <div className="text-[11px] text-muted-foreground mt-1">
+                        変更後はフォーカスを外すと反映されます。
+                      </div>
                     </div>
                     <div>
                       <div className="flex items-center justify-between">
@@ -775,6 +1037,52 @@ export function SlideStudio({
                       className="w-full"
                       dangerouslySetInnerHTML={{ __html: exportDiagramSvg }}
                     />
+                  </div>
+                )}
+                {showExportImage && (
+                  <div className="w-full h-full border border-black/10 rounded-xl p-3 overflow-hidden flex items-center justify-center">
+                    <img
+                      src={exportImage}
+                      alt="Slide visual"
+                      className="max-h-full w-auto object-contain"
+                    />
+                  </div>
+                )}
+                {showExportChart && (
+                  <div className="w-full h-full border border-black/10 rounded-xl p-3 overflow-hidden flex items-center justify-center">
+                    <img
+                      src={exportChartUrl}
+                      alt="Slide chart"
+                      className="max-h-full w-auto object-contain"
+                    />
+                  </div>
+                )}
+                {showExportTable && (
+                  <div className="w-full h-full border border-black/10 rounded-xl p-4 overflow-auto">
+                    <table className="w-full text-[14px] border border-black/10">
+                      {exportTable?.headers && exportTable.headers.length > 0 && (
+                        <thead>
+                          <tr>
+                            {exportTable.headers.map((h, i) => (
+                              <th key={i} className="text-left font-semibold px-2 py-1 border border-black/10">
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                      )}
+                      <tbody>
+                        {(exportTable?.rows || []).map((row, rIdx) => (
+                          <tr key={rIdx}>
+                            {(row || []).map((cell, cIdx) => (
+                              <td key={cIdx} className="px-2 py-1 border border-black/10">
+                                {cell}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>

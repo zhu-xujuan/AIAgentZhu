@@ -75,6 +75,22 @@ SLIDE_DECK_JSON_SCHEMA = {
             "title": "string",
             "bullets": ["string"],
             "diagram_mermaid": "string (optional, Mermaid code)",
+            "table": {
+                "headers": ["string"],
+                "rows": [["string"]],
+            },
+            "image_url": "string (optional, only if provided in sources)",
+            "chart": {
+                "type": "bar | line | pie",
+                "title": "string (optional)",
+                "labels": ["string"],
+                "datasets": [
+                    {
+                        "label": "string (optional)",
+                        "data": ["number"],
+                    }
+                ],
+            },
             "speaker_notes": "string (optional)",
             "citations": [
                 {
@@ -111,6 +127,10 @@ def build_generate_slide_prompt(
 - 1枚あたり 3〜6 bullet
 - bullets は短く（1行で読める）
 - 可能なら diagram_mermaid に Mermaid 記法の簡単な図（フローチャート等）を入れる（不要なら空/省略）
+- 比較や一覧に向く場合は table（headers/rows）を入れる（不要なら空/省略）
+- image_url は参考文書に明記されている場合のみ入れる（推測でURLを作らない）
+- グラフが効果的なら chart を入れる（type/labels/datasets）。数値は参考文書にある場合のみ使う
+- 文書に明記がない場合は、例示（「例」「イメージ」）として抽象的な図・表・フローを作ってもよいが、事実と誤解される具体的数値や固有名は使わない
 - citations は可能な限り付ける（source_id, source_title, quote）
 - quote は参考文書 text からの短い抜粋（120文字以内）
 
@@ -146,6 +166,9 @@ def build_refine_slide_prompt(
 - 1枚あたり 3〜6 bullet
 - 文書にない情報は追加しない
 - diagram_mermaid は必要に応じて更新してよい（文書根拠に基づく）
+- table は必要に応じて更新してよい（文書根拠に基づく）
+- image_url は参考文書に明記されている場合のみ維持/追加（推測でURLを作らない）
+- chart は必要に応じて更新してよい（文書根拠に基づく）。文書に明記がない場合は例示として抽象的な図・表・フローを作ってもよい
 - citations は可能な限り維持/追加（source_id, source_title, quote）
 
 ## 出力形式（JSONのみ）
@@ -197,6 +220,80 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
         if diagram_mermaid is not None:
             diagram_mermaid = str(diagram_mermaid).strip()
 
+        image_url = s.get("image_url") or s.get("image")
+        if image_url is not None:
+            image_url = str(image_url).strip()
+
+        chart_raw = s.get("chart") or s.get("chart_data") or s.get("chart_json")
+        if isinstance(chart_raw, str):
+            try:
+                chart_raw = json.loads(chart_raw)
+            except Exception:
+                chart_raw = None
+        chart_out = None
+        if isinstance(chart_raw, dict):
+            ctype = str(chart_raw.get("type") or "").strip().lower()
+            if ctype in {"bar", "line", "pie"}:
+                labels_in = chart_raw.get("labels") or []
+                labels = [str(l).strip() for l in labels_in[:12]] if isinstance(labels_in, list) else []
+                datasets_in = chart_raw.get("datasets") or []
+                datasets = []
+                if isinstance(datasets_in, list):
+                    for d in datasets_in[:3]:
+                        if not isinstance(d, dict):
+                            continue
+                        data_in = d.get("data") or []
+                        data = []
+                        if isinstance(data_in, list):
+                            for v in data_in[:12]:
+                                try:
+                                    data.append(float(v))
+                                except Exception:
+                                    data.append(0.0)
+                        label = str(d.get("label") or "").strip()
+                        datasets.append({"label": label, "data": data})
+                title = str(chart_raw.get("title") or "").strip()
+                if labels or datasets:
+                    chart_out = {"type": ctype, "title": title, "labels": labels, "datasets": datasets}
+
+        table_raw = s.get("table")
+        if table_raw is None and (s.get("table_headers") or s.get("table_rows")):
+            table_raw = {
+                "headers": s.get("table_headers"),
+                "rows": s.get("table_rows"),
+            }
+        if table_raw is None and isinstance(s.get("table_data"), list):
+            table_raw = {"rows": s.get("table_data")}
+
+        headers_norm: list[str] = []
+        rows_norm: list[list[str]] = []
+        if isinstance(table_raw, dict):
+            headers = table_raw.get("headers") or table_raw.get("header") or []
+            rows = table_raw.get("rows") or table_raw.get("data") or []
+        elif isinstance(table_raw, list):
+            headers = []
+            rows = table_raw
+        else:
+            headers = []
+            rows = []
+
+        if isinstance(headers, list):
+            for h in headers[:10]:
+                h_str = str(h).strip()
+                headers_norm.append(h_str)
+
+        if isinstance(rows, list):
+            for r in rows[:12]:
+                if isinstance(r, list):
+                    row_out: list[str] = []
+                    for cell in r[:10]:
+                        row_out.append(str(cell).strip())
+                    rows_norm.append(row_out)
+                elif isinstance(r, str):
+                    rows_norm.append([r.strip()])
+
+        table_out = {"headers": headers_norm, "rows": rows_norm} if headers_norm or rows_norm else None
+
         citations_in = s.get("citations") or []
         if not isinstance(citations_in, list):
             citations_in = []
@@ -229,6 +326,9 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
                 "title": stitle,
                 "bullets": bullets_norm[:8],
                 "diagram_mermaid": diagram_mermaid or "",
+                "table": table_out,
+                "image_url": image_url or "",
+                "chart": chart_out,
                 "speaker_notes": speaker_notes or "",
                 "citations": citations_out[:6],
             }
