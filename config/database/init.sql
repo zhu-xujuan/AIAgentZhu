@@ -110,6 +110,40 @@ EXCEPTION WHEN OTHERS THEN
 END
 $$;
 
+-- Query cache table: 回答キャッシュ（ファジーマッチ対応）
+CREATE TABLE IF NOT EXISTS query_cache (
+    id SERIAL PRIMARY KEY,
+    mode VARCHAR(20) NOT NULL DEFAULT 'standard',
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    sources JSONB DEFAULT '[]'::jsonb,
+    confidence DECIMAL(3,2),
+    has_answer BOOLEAN DEFAULT TRUE,
+    search_time DECIMAL(6,2),
+    intent VARCHAR(50),
+    search_mode VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Add embedding column for fuzzy matching (pgvector)
+DO $$
+BEGIN
+    ALTER TABLE query_cache ADD COLUMN question_embedding vector(768);
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Could not add question_embedding column to query_cache (pgvector not available)';
+END
+$$;
+
+-- HNSW index for fast cosine similarity search on cache
+DO $$
+BEGIN
+    CREATE INDEX IF NOT EXISTS idx_query_cache_embedding
+        ON query_cache USING hnsw (question_embedding vector_cosine_ops);
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Could not create query_cache vector index (pgvector not available)';
+END
+$$;
+
 -- Migration: Add checksum column if not exists (for existing databases)
 DO $$
 BEGIN

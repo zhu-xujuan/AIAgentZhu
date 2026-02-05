@@ -84,9 +84,11 @@ interface ChatMessage {
   id: string;
   type: 'user' | 'assistant';
   content: string;
-  result?: QueryResult & { mode?: string };
+  result?: QueryResult & { mode?: string; from_cache?: boolean };
   isStreaming?: boolean;
   timestamp: Date;
+  /** The original question text (for re-search) */
+  questionText?: string;
 }
 
 export default function QueryPage() {
@@ -109,14 +111,14 @@ export default function QueryPage() {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  const handleStreamingQuery = async (questionText: string, messageId: string, mode: SearchMode) => {
+  const handleStreamingQuery = async (questionText: string, messageId: string, mode: SearchMode, skipCache = false) => {
     abortControllerRef.current = new AbortController();
 
     try {
       const response = await fetch(`${API_BASE}/pipeline/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: questionText, mode }),
+        body: JSON.stringify({ question: questionText, mode, skip_cache: skipCache }),
         signal: abortControllerRef.current.signal,
       });
 
@@ -164,6 +166,7 @@ export default function QueryPage() {
                   has_answer: data.has_answer,
                   search_time_seconds: data.search_time,
                   mode: data.mode,
+                  from_cache: data.from_cache,
                 };
                 setMessages(prev => prev.map(msg =>
                   msg.id === messageId
@@ -171,6 +174,7 @@ export default function QueryPage() {
                         ...msg,
                         content: accumulatedText,
                         isStreaming: false,
+                        questionText: questionText,
                         result: {
                           question: questionText,
                           answer: accumulatedText,
@@ -181,6 +185,7 @@ export default function QueryPage() {
                           error: null,
                           search_time_seconds: metadata.search_time_seconds || null,
                           mode: metadata.mode,
+                          from_cache: metadata.from_cache,
                         },
                       }
                     : msg
@@ -254,6 +259,31 @@ export default function QueryPage() {
   const clearChat = () => {
     setMessages([]);
     setError(null);
+  };
+
+  const handleResearch = async (originalQuestion: string) => {
+    const assistantMessageId = `assistant-${Date.now()}`;
+    const assistantMessage: ChatMessage = {
+      id: assistantMessageId,
+      type: 'assistant',
+      content: '',
+      isStreaming: true,
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, assistantMessage]);
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      await handleStreamingQuery(originalQuestion, assistantMessageId, searchMode, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Query failed');
+      setMessages((prev) => prev.filter(msg => msg.id !== assistantMessageId));
+    } finally {
+      setIsLoading(false);
+      abortControllerRef.current = null;
+    }
   };
 
   // モードに応じたバッジの色
@@ -396,7 +426,7 @@ export default function QueryPage() {
 
                   {/* Confidence & Status */}
                   {message.result && !message.isStreaming && (
-                    <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-100">
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100">
                       <span className={`px-2 py-0.5 text-xs rounded ${message.result.has_answer ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
                         {message.result.has_answer ? 'Found' : 'Not Found'}
                       </span>
@@ -412,6 +442,20 @@ export default function QueryPage() {
                         <span className={`px-2 py-0.5 text-xs rounded ${getModeColor(message.result.mode)}`}>
                           {getModeLabel(message.result.mode)}
                         </span>
+                      )}
+                      {message.result.from_cache && (
+                        <>
+                          <span className="px-2 py-0.5 text-xs rounded bg-cyan-100 text-cyan-700">
+                            キャッシュ
+                          </span>
+                          <button
+                            onClick={() => message.questionText && handleResearch(message.questionText)}
+                            disabled={isLoading}
+                            className="px-2 py-0.5 text-xs rounded bg-indigo-100 text-indigo-700 hover:bg-indigo-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            再検索
+                          </button>
+                        </>
                       )}
                     </div>
                   )}

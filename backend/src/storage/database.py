@@ -894,6 +894,233 @@ class DatabaseService:
                 logger.error(f"Failed to delete document: {e}")
                 raise
 
+    # ============================================================
+    # Query Cache Methods
+    # ============================================================
+
+    _cache_table_ready: bool = False
+
+    def ensure_cache_table(self) -> bool:
+        """
+        Create query_cache table if it doesn't exist (auto-migration).
+        Called once on startup. Safe to call multiple times.
+
+        Returns:
+            True if table is ready, False otherwise.
+        """
+        if DatabaseService._cache_table_ready:
+            return True
+
+        try:
+            with self._get_cursor() as (cursor, conn):
+                # Create table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS query_cache (
+                        id SERIAL PRIMARY KEY,
+                        mode VARCHAR(20) NOT NULL DEFAULT 'standard',
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        sources JSONB DEFAULT '[]'::jsonb,
+                        confidence DECIMAL(3,2),
+                        has_answer BOOLEAN DEFAULT TRUE,
+                        search_time DECIMAL(6,2),
+                        intent VARCHAR(50),
+                        search_mode VARCHAR(50),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.commit()
+
+                # Add embedding column if pgvector is available
+                if self.has_vector_support():
+                    try:
+                        cursor.execute(
+                            "ALTER TABLE query_cache ADD COLUMN question_embedding vector(768)"
+                        )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()  # Column already exists
+
+                    try:
+                        cursor.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_query_cache_embedding
+                                ON query_cache USING hnsw (question_embedding vector_cosine_ops)
+                        """)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+
+                # Verify table exists
+                cursor.execute(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'query_cache')"
+                )
+                exists = cursor.fetchone()[0]
+
+                if exists:
+                    DatabaseService._cache_table_ready = True
+                    logger.info("Query cache table ready")
+                    return True
+                else:
+                    logger.error("Query cache table creation failed (table not found after CREATE)")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to ensure query_cache table: {e}")
+            return False
+
+    def get_cached_response(
+        self,
+        question_embedding: list[float],
+        mode: str = "standard",
+        threshold: float = 0.80,
+    ) -> Optional[dict]:
+        """
+        Search query_cache for a similar question using cosine similarity.
+
+        Args:
+            question_embedding: Embedding vector of the new question.
+            mode: Search mode (fast/standard/accurate).
+            threshold: Minimum cosine similarity to consider a cache hit.
+
+        Returns:
+            Cached response dict if found, None otherwise.
+        """
+        if not self.has_vector_support():
+            return None
+        if not self.ensure_cache_table():
+            return None
+
+        try:
+            embedding_str = "[" + ",".join(str(x) for x in question_embedding) + "]"
+
+            with self._get_cursor(dict_cursor=True) as (cursor, conn):
+                cursor.execute(
+                    """
+                    SELECT *,
+                           1 - (question_embedding <=> %s::vector) AS similarity
+                    FROM query_cache
+                    WHERE mode = %s
+                      AND question_embedding IS NOT NULL
+                      AND 1 - (question_embedding <=> %s::vector) >= %s
+                    ORDER BY question_embedding <=> %s::vector
+                    LIMIT 1
+                    """,
+                    (embedding_str, mode, embedding_str, threshold, embedding_str),
+                )
+                row = cursor.fetchone()
+
+                if row:
+                    import json
+                    sources = row.get("sources", [])
+                    if isinstance(sources, str):
+                        sources = json.loads(sources)
+
+                    logger.info(
+                        f"Cache HIT: similarity={row['similarity']:.3f}, "
+                        f"question='{row['question'][:50]}...'"
+                    )
+                    return {
+                        "question": row["question"],
+                        "answer": row["answer"],
+                        "sources": sources,
+                        "confidence": float(row["confidence"]) if row.get("confidence") else 0.0,
+                        "has_answer": row.get("has_answer", True),
+                        "search_time": float(row["search_time"]) if row.get("search_time") else 0.0,
+                        "intent": row.get("intent"),
+                        "search_mode": row.get("search_mode"),
+                        "similarity": float(row["similarity"]),
+                    }
+
+            return None
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Cache lookup FAILED: {e}\n{traceback.format_exc()}")
+            return None
+
+    def save_cached_response(
+        self,
+        question: str,
+        question_embedding: Optional[list[float]],
+        mode: str,
+        answer: str,
+        sources: list,
+        confidence: Optional[float] = None,
+        has_answer: bool = True,
+        search_time: Optional[float] = None,
+        intent: Optional[str] = None,
+        search_mode: Optional[str] = None,
+    ) -> bool:
+        """
+        Save a query response to the cache.
+
+        Returns:
+            True if saved successfully, False otherwise.
+        """
+        if not self.ensure_cache_table():
+            return False
+
+        try:
+            import json
+            sources_json = json.dumps(sources, ensure_ascii=False)
+
+            has_vector = self.has_vector_support()
+            embedding_str = None
+            if question_embedding and has_vector:
+                embedding_str = "[" + ",".join(str(x) for x in question_embedding) + "]"
+
+            with self._get_cursor() as (cursor, conn):
+                if embedding_str:
+                    cursor.execute(
+                        """
+                        INSERT INTO query_cache
+                            (mode, question, question_embedding, answer, sources,
+                             confidence, has_answer, search_time, intent, search_mode)
+                        VALUES (%s, %s, %s::vector, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                        """,
+                        (mode, question, embedding_str, answer, sources_json,
+                         confidence, has_answer, search_time, intent, search_mode),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO query_cache
+                            (mode, question, answer, sources,
+                             confidence, has_answer, search_time, intent, search_mode)
+                        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                        """,
+                        (mode, question, answer, sources_json,
+                         confidence, has_answer, search_time, intent, search_mode),
+                    )
+                conn.commit()
+                logger.info(f"Cache SAVE: mode={mode}, question='{question[:50]}...'")
+                return True
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Cache save FAILED: {e}\n{traceback.format_exc()}")
+            return False
+
+    def clear_query_cache(self) -> int:
+        """
+        Clear all entries from the query cache (TRUNCATE).
+
+        Returns:
+            0 on success (TRUNCATE doesn't return row count).
+        """
+        if not self.ensure_cache_table():
+            return -1
+
+        try:
+            with self._get_cursor() as (cursor, conn):
+                cursor.execute("TRUNCATE TABLE query_cache")
+                conn.commit()
+                logger.info("Query cache cleared (TRUNCATE)")
+                return 0
+        except Exception as e:
+            logger.warning(f"Cache clear failed (non-fatal): {e}")
+            return -1
+
     def get_stats(self) -> dict:
         """Get database statistics using a single optimized query."""
         with self._get_cursor(dict_cursor=True) as (cursor, conn):

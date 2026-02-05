@@ -10,7 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, List
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -113,6 +113,12 @@ async def lifespan(app: FastAPI):
                 logger.info("pgvector extension is available - vector search enabled")
             else:
                 logger.warning("pgvector extension NOT available - using full-text search fallback")
+
+            # Ensure query cache table exists (auto-migration)
+            if db_service.ensure_cache_table():
+                logger.info("Query cache (CAG) is ACTIVE - similar questions will be served from cache")
+            else:
+                logger.warning("Query cache (CAG) is INACTIVE - cache table could not be created")
         else:
             logger.warning("Database service not available. QA features will be disabled.")
     except Exception as e:
@@ -181,6 +187,7 @@ class QualityCheckRequest(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     mode: Optional[str] = "standard"  # "fast", "standard", "accurate"
+    skip_cache: Optional[bool] = False  # True to force re-search
 
 
 class FormatRequest(BaseModel):
@@ -191,6 +198,148 @@ class FormatRequest(BaseModel):
 # ============================================================
 # Health Check & Debug
 # ============================================================
+
+@app.get("/debug/cache")
+async def debug_cache():
+    """Debug endpoint to inspect query cache status and contents."""
+    result = {
+        "db_service_exists": db_service is not None,
+        "vector_support": False,
+        "cache_table_exists": False,
+        "cache_table_ready_flag": False,
+        "row_count": 0,
+        "recent_entries": [],
+        "test_insert": None,
+        "errors": [],
+    }
+
+    if not db_service:
+        result["errors"].append("db_service is None")
+        return result
+
+    try:
+        result["vector_support"] = db_service.has_vector_support()
+        from src.storage.database import DatabaseService
+        result["cache_table_ready_flag"] = DatabaseService._cache_table_ready
+    except Exception as e:
+        result["errors"].append(f"vector check: {e}")
+
+    # Check if table exists
+    try:
+        with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'query_cache')"
+            )
+            result["cache_table_exists"] = cursor.fetchone()["exists"]
+    except Exception as e:
+        result["errors"].append(f"table check: {e}")
+
+    if not result["cache_table_exists"]:
+        # Try to create it
+        try:
+            created = db_service.ensure_cache_table()
+            result["ensure_cache_table_result"] = created
+        except Exception as e:
+            result["errors"].append(f"ensure_cache_table: {e}")
+        return result
+
+    # Count rows
+    try:
+        with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute("SELECT COUNT(*) as cnt FROM query_cache")
+            result["row_count"] = cursor.fetchone()["cnt"]
+    except Exception as e:
+        result["errors"].append(f"count: {e}")
+
+    # Check columns
+    try:
+        with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = 'query_cache'
+                ORDER BY ordinal_position
+            """)
+            result["columns"] = [
+                {"name": r["column_name"], "type": r["data_type"]}
+                for r in cursor.fetchall()
+            ]
+    except Exception as e:
+        result["errors"].append(f"columns: {e}")
+
+    # Recent entries (without full answer)
+    try:
+        with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute("""
+                SELECT id, mode, question, LEFT(answer, 80) as answer_preview,
+                       confidence, has_answer, search_time, intent, search_mode,
+                       created_at,
+                       question_embedding IS NOT NULL as has_embedding
+                FROM query_cache
+                ORDER BY created_at DESC
+                LIMIT 5
+            """)
+            result["recent_entries"] = [
+                {**dict(row), "created_at": str(row["created_at"])}
+                for row in cursor.fetchall()
+            ]
+    except Exception as e:
+        result["errors"].append(f"recent entries: {e}")
+
+    # Test: try embedding + save + lookup cycle
+    if ollama_client and result["vector_support"]:
+        try:
+            test_q = "__cache_debug_test__"
+            embed_result = await ollama_client.embed(test_q)
+            result["test_embed_success"] = embed_result.success
+            result["test_embed_dim"] = len(embed_result.embedding) if embed_result.success else 0
+
+            if embed_result.success:
+                # Save
+                save_ok = db_service.save_cached_response(
+                    question=test_q,
+                    question_embedding=embed_result.embedding,
+                    mode="debug",
+                    answer="debug_answer",
+                    sources=[],
+                    confidence=1.0,
+                    has_answer=True,
+                    search_time=0.0,
+                    intent="debug",
+                    search_mode="debug",
+                )
+                result["test_save"] = save_ok
+
+                # Lookup
+                cached = db_service.get_cached_response(embed_result.embedding, "debug")
+                result["test_lookup"] = cached is not None
+                if cached:
+                    result["test_lookup_similarity"] = cached.get("similarity")
+
+                # Cleanup
+                with db_service._get_cursor() as (cursor, conn):
+                    cursor.execute("DELETE FROM query_cache WHERE question = %s", (test_q,))
+                    conn.commit()
+                result["test_cleanup"] = True
+        except Exception as e:
+            result["errors"].append(f"test cycle: {e}")
+            import traceback
+            result["test_traceback"] = traceback.format_exc()
+
+    return result
+
+
+@app.delete("/debug/cache")
+async def clear_cache():
+    """Clear all entries from the query cache."""
+    if not db_service:
+        return {"success": False, "error": "db_service is None"}
+    try:
+        result = db_service.clear_query_cache()
+        return {"success": result == 0, "message": "Cache cleared"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 @app.get("/debug/database")
 async def debug_database():
@@ -233,6 +382,25 @@ async def debug_database():
             result["db_service_connection"] = f"success: {stats}"
         except Exception as e:
             result["db_service_connection"] = f"failed: {str(e)}"
+
+        # Cache diagnostics
+        try:
+            from src.storage.database import DatabaseService
+            result["cache"] = {
+                "table_ready_flag": DatabaseService._cache_table_ready,
+                "vector_support": db_service.has_vector_support(),
+            }
+            with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+                cursor.execute(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'query_cache')"
+                )
+                result["cache"]["table_exists"] = cursor.fetchone()["exists"]
+            if result["cache"]["table_exists"]:
+                with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+                    cursor.execute("SELECT COUNT(*) as cnt FROM query_cache")
+                    result["cache"]["row_count"] = cursor.fetchone()["cnt"]
+        except Exception as e:
+            result["cache"] = {"error": str(e)}
     else:
         result["db_service_connection"] = "db_service is None"
 
@@ -329,6 +497,19 @@ async def health_check():
         result["database"]["stats"] and
         result["database"]["stats"].get("chunks_with_embeddings", 0) > 0
     )
+
+    # Cache status (for debugging)
+    result["cache"] = {"code_version": "2024-02-05-v2"}
+    if db_service:
+        try:
+            from src.storage.database import DatabaseService
+            result["cache"]["table_ready"] = DatabaseService._cache_table_ready
+            result["cache"]["vector_support"] = db_service.has_vector_support()
+            with db_service._get_cursor(dict_cursor=True) as (cursor, conn):
+                cursor.execute("SELECT COUNT(*) as cnt FROM query_cache")
+                result["cache"]["row_count"] = cursor.fetchone()["cnt"]
+        except Exception as e:
+            result["cache"]["error"] = str(e)
 
     return result
 
@@ -551,6 +732,14 @@ async def delete_file_by_id(file_id: str):
         if not storage_deleted and not db_deleted:
             raise HTTPException(status_code=404, detail="File not found")
 
+        # Invalidate query cache when a file is deleted
+        if db_deleted and db_service:
+            try:
+                db_service.clear_query_cache()
+                logger.info(f"Query cache cleared after file deletion: {file_id}")
+            except Exception as cache_err:
+                logger.warning(f"Failed to clear query cache: {cache_err}")
+
         message = f"File '{doc_name or file_id}' deleted successfully"
         if db_deleted and storage_deleted:
             message += " (from both database and storage)"
@@ -604,6 +793,14 @@ async def delete_document(document_id: int):
             logger.info(f"Deleted file from storage: {doc.file_id}")
         else:
             logger.warning(f"File not found in storage: {doc.file_id}")
+
+        # Invalidate query cache when a document is deleted
+        if db_service:
+            try:
+                db_service.clear_query_cache()
+                logger.info(f"Query cache cleared after document deletion: {document_id}")
+            except Exception as cache_err:
+                logger.warning(f"Failed to clear query cache: {cache_err}")
 
         logger.info(f"Deleted document {document_id} ({doc.file_name})")
         return {
@@ -980,6 +1177,14 @@ async def ingest_document(file: UploadFile = File(...)):
         logger.error(f"[INGEST] Step 6 failed: {e}")
         quality = {"needs_review": False, "reasons": []}
 
+    # Invalidate query cache when new document is ingested
+    if db_service and doc_id and not is_duplicate:
+        try:
+            db_service.clear_query_cache()
+            logger.info("[INGEST] Query cache cleared after new document ingestion")
+        except Exception as e:
+            logger.warning(f"[INGEST] Failed to clear query cache: {e}")
+
     total_time = time.time() - start_time
     logger.info(f"[INGEST] Ingestion completed for {file.filename}: total_time={total_time:.2f}s, chunks={len(chunks['chunks'])}, facts={len(facts['facts'])}")
 
@@ -1024,7 +1229,7 @@ def _try_reconnect_database() -> bool:
 
 
 @app.post("/pipeline/query")
-async def query_documents(request: QueryRequest):
+async def query_documents(request: QueryRequest, background_tasks: BackgroundTasks):
     """
     Query pipeline with Intent Router:
     1. Classify question intent (rule-based → LLM fallback)
@@ -1035,7 +1240,8 @@ async def query_documents(request: QueryRequest):
     """
     import time
     query_start = time.time()
-    logger.info(f"[QUERY] === Starting query: '{request.question[:50]}...' ===")
+    mode = request.mode or "standard"
+    logger.info(f"[QUERY] === Starting query (mode={mode}, skip_cache={request.skip_cache}): '{request.question[:50]}...' ===")
 
     # Try to reconnect to database if not connected
     if not _try_reconnect_database():
@@ -1105,7 +1311,32 @@ async def query_documents(request: QueryRequest):
         # Log the routing result
         logger.info(f"Query routed: intent={response.intent}, search_mode={response.search_mode}, search_time={search_time:.2f}s")
 
-        return router_response_to_dict(response)
+        result_dict = router_response_to_dict(response)
+        result_dict["from_cache"] = False
+
+        # --- Non-blocking cache save (background task, zero impact on response time) ---
+        answer_text = result_dict.get("answer", "")
+        is_not_found = "見つかりませんでした" in answer_text or "情報がありません" in answer_text
+        if db_service and ollama_client and answer_text and not is_not_found:
+            async def _bg_cache_save(q, m, answer, res_dict):
+                try:
+                    embed_result = await ollama_client.embed(q)
+                    if embed_result.success:
+                        db_service.save_cached_response(
+                            question=q, question_embedding=embed_result.embedding,
+                            mode=m, answer=answer,
+                            sources=res_dict.get("sources", []),
+                            confidence=res_dict.get("confidence"),
+                            has_answer=res_dict.get("has_answer", False),
+                            search_time=res_dict.get("search_time_seconds"),
+                            intent=res_dict.get("intent"),
+                            search_mode=res_dict.get("search_mode"),
+                        )
+                except Exception as e:
+                    logger.warning(f"[QUERY] Background cache save failed: {e}")
+            background_tasks.add_task(_bg_cache_save, request.question, mode, answer_text, result_dict)
+
+        return result_dict
 
     except Exception as e:
         logger.error(f"Query failed: {e}")
@@ -1137,6 +1368,7 @@ async def chat_stream(request: QueryRequest):
     query_start = time.time()
     question = request.question
     mode = request.mode or "standard"
+    skip_cache = request.skip_cache or False
 
     # Mode configuration
     MODE_CONFIG = {
@@ -1146,7 +1378,7 @@ async def chat_stream(request: QueryRequest):
     }
     config = MODE_CONFIG.get(mode, MODE_CONFIG["standard"])
 
-    logger.info(f"[STREAM] === Starting streaming query (mode={mode}): '{question[:50]}...' ===")
+    logger.info(f"[STREAM] === Starting streaming query (mode={mode}, skip_cache={skip_cache}): '{question[:50]}...' ===")
 
     async def generate_stream():
         """Generator for SSE streaming response."""
@@ -1159,7 +1391,27 @@ async def chat_stream(request: QueryRequest):
                 yield f"data: {json.dumps({'error': 'LLM not available'})}\n\n"
                 return
 
-            # Step 1: Query expansion (skip in fast mode)
+            # Step 1: Generate embedding (needed for cache check AND search)
+            step_start = time.time()
+            embed_result = await ollama_client.embed(question)
+            query_embedding = embed_result.embedding if embed_result.success else None
+            logger.info(f"[STREAM] Embedding: {time.time() - step_start:.2f}s")
+
+            # --- Cache check (before expansion — saves ~15s on cache HIT) ---
+            if not skip_cache and query_embedding:
+                cache_start = time.time()
+                cached = db_service.get_cached_response(query_embedding, mode)
+                cache_ms = round((time.time() - cache_start) * 1000)
+                if cached:
+                    logger.info(f"[STREAM] Cache HIT ({cache_ms}ms)")
+                    yield f"data: {json.dumps({'type': 'sources', 'sources': cached['sources']})}\n\n"
+                    yield f"data: {json.dumps({'type': 'text', 'text': cached['answer']})}\n\n"
+                    search_time = round(time.time() - query_start, 2)
+                    yield f"data: {json.dumps({'type': 'done', 'confidence': cached['confidence'], 'has_answer': cached['has_answer'], 'search_time': search_time, 'mode': mode, 'from_cache': True})}\n\n"
+                    return
+                logger.info(f"[STREAM] Cache MISS ({cache_ms}ms)")
+
+            # Step 2: Query expansion (only on cache MISS, skip in fast mode)
             search_query = question
             if config["use_expansion"]:
                 step_start = time.time()
@@ -1168,12 +1420,6 @@ async def chat_stream(request: QueryRequest):
                 logger.info(f"[STREAM] Query expansion: {time.time() - step_start:.2f}s")
             else:
                 logger.info(f"[STREAM] Query expansion: SKIPPED (fast mode)")
-
-            # Step 2: Generate embedding
-            step_start = time.time()
-            embed_result = await ollama_client.embed(question)
-            query_embedding = embed_result.embedding if embed_result.success else None
-            logger.info(f"[STREAM] Embedding: {time.time() - step_start:.2f}s")
 
             # Step 3: Search
             step_start = time.time()
@@ -1201,7 +1447,7 @@ async def chat_stream(request: QueryRequest):
 
             if not search_results:
                 yield f"data: {json.dumps({'type': 'text', 'text': '文書内に該当する情報が見つかりませんでした。'})}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'search_time': round(time.time() - query_start, 2)})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'search_time': round(time.time() - query_start, 2), 'from_cache': False})}\n\n"
                 return
 
             # Step 4: Format context and generate response
@@ -1210,11 +1456,13 @@ async def chat_stream(request: QueryRequest):
 
             # Step 5: Stream LLM response
             logger.info(f"[STREAM] Starting LLM generation...")
+            answer_parts = []
             async for chunk in ollama_client.generate_stream(
                 prompt=prompt,
                 system=QA_SYSTEM_PROMPT,
                 temperature=0.3,
             ):
+                answer_parts.append(chunk)
                 yield f"data: {json.dumps({'type': 'text', 'text': chunk})}\n\n"
 
             # Calculate confidence
@@ -1222,10 +1470,28 @@ async def chat_stream(request: QueryRequest):
             avg_similarity = sum(r.similarity for r in search_results) / len(search_results) if search_results else 0
             confidence = round(min(1.0, (top_similarity * 0.6) + (avg_similarity * 0.4)), 2)
 
-            # Send completion
             search_time = round(time.time() - query_start, 2)
-            yield f"data: {json.dumps({'type': 'done', 'confidence': confidence, 'has_answer': True, 'search_time': search_time, 'mode': mode})}\n\n"
+
+            # Send completion immediately (no blocking on cache save)
+            yield f"data: {json.dumps({'type': 'done', 'confidence': confidence, 'has_answer': True, 'search_time': search_time, 'mode': mode, 'from_cache': False})}\n\n"
             logger.info(f"[STREAM] Completed in {search_time}s (mode={mode})")
+
+            # --- Non-blocking cache save (background thread, zero impact on response time) ---
+            accumulated_answer = "".join(answer_parts)
+            is_not_found = "見つかりませんでした" in accumulated_answer or "情報がありません" in accumulated_answer
+            if query_embedding and accumulated_answer and not is_not_found:
+                import threading
+                _db = db_service
+                _args = dict(
+                    question=question, question_embedding=query_embedding,
+                    mode=mode, answer=accumulated_answer, sources=sources,
+                    confidence=confidence, has_answer=True, search_time=search_time,
+                    intent="general_qa", search_mode="hybrid",
+                )
+                threading.Thread(
+                    target=lambda: _db.save_cached_response(**_args) if _db else None,
+                    daemon=True,
+                ).start()
 
         except Exception as e:
             logger.error(f"[STREAM] Error: {e}")

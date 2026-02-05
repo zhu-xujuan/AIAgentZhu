@@ -90,7 +90,7 @@ class AIClient:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "qwen2.5:7b",
+        model: str = "qwen3:30b",
         embedding_model: str = "nomic-embed-text",
         timeout: float = 60.0,
         max_retries: int = 2,
@@ -272,6 +272,18 @@ class AIClient:
             error=last_error,
         )
 
+    @staticmethod
+    def _strip_thinking_tags(text: str) -> str:
+        """Strip thinking content from model output (e.g. Qwen3 thinking mode).
+        Handles both <think>...</think> blocks and orphan </think> tags."""
+        import re
+        # Handle full <think>...</think> blocks
+        text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+        # Handle orphan </think> (thinking content without opening tag)
+        if '</think>' in text:
+            text = text.split('</think>', 1)[-1].strip()
+        return text
+
     async def _generate_ollama(
         self,
         client: httpx.AsyncClient,
@@ -286,6 +298,7 @@ class AIClient:
             "model": model,
             "prompt": prompt,
             "stream": False,
+            "think": False,
             "options": {"temperature": temperature},
         }
 
@@ -301,8 +314,13 @@ class AIClient:
         total_duration_ns = data.get("total_duration", 0)
         total_duration_ms = total_duration_ns / 1_000_000
 
+        text = data.get("response", "")
+        # Defensive: strip any thinking tags that might slip through
+        if "<think>" in text or "</think>" in text:
+            text = self._strip_thinking_tags(text)
+
         return GenerateResult(
-            text=data.get("response", ""),
+            text=text,
             model=data.get("model", model),
             total_duration_ms=round(total_duration_ms, 2),
             prompt_eval_count=data.get("prompt_eval_count", 0),
@@ -442,6 +460,7 @@ class AIClient:
             "model": model,
             "prompt": prompt,
             "stream": True,
+            "think": False,
             "options": {"temperature": temperature},
         }
 
@@ -450,6 +469,13 @@ class AIClient:
 
         # Use a longer timeout for streaming
         timeout = httpx.Timeout(300.0, connect=10.0)
+
+        # Buffer to absorb thinking content (Qwen3 outputs thinking as regular
+        # response text, terminated by </think>). Once </think> is found, we
+        # discard the buffer and start yielding the actual answer.
+        think_buffer = []
+        found_think_end = False
+        MAX_THINK_BUFFER = 20000  # safety limit (chars)
 
         async with httpx.AsyncClient(
             base_url=self.base_url,
@@ -463,8 +489,28 @@ class AIClient:
                         try:
                             data = json.loads(line)
                             if "response" in data:
-                                yield data["response"]
+                                text = data["response"]
+
+                                if not found_think_end:
+                                    think_buffer.append(text)
+                                    joined = "".join(think_buffer)
+                                    if "</think>" in joined:
+                                        # Thinking phase complete — yield only the answer part
+                                        found_think_end = True
+                                        after = joined.split("</think>", 1)[1].lstrip("\n")
+                                        if after:
+                                            yield after
+                                    elif len(joined) > MAX_THINK_BUFFER:
+                                        # Safety: model isn't using thinking, flush buffer
+                                        found_think_end = True
+                                        yield joined
+                                else:
+                                    yield text
+
                             if data.get("done", False):
+                                # If we never found </think>, yield all buffered content
+                                if not found_think_end and think_buffer:
+                                    yield "".join(think_buffer)
                                 break
                         except json.JSONDecodeError:
                             continue

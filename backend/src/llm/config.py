@@ -57,9 +57,9 @@ class LLMConfig:
     provider: AIProvider = AIProvider.OLLAMA
     base_url: str = "http://localhost:11434"
     api_key: Optional[str] = None
-    model: str = "qwen2.5:7b"
+    model: str = "qwen3:30b"
     embedding_model: str = "nomic-embed-text"
-    timeout: float = 60.0
+    timeout: float = 180.0
     max_retries: int = 2
 
     # Parallel processing settings
@@ -187,7 +187,7 @@ def get_llm_config() -> LLMConfig:
     api_key = os.getenv("AI_API_KEY") or None
 
     # Model (AI_MODEL > OLLAMA_MODEL > default)
-    model = os.getenv("AI_MODEL") or os.getenv("OLLAMA_MODEL") or "qwen2.5:7b"
+    model = os.getenv("AI_MODEL") or os.getenv("OLLAMA_MODEL") or "qwen3:30b"
 
     # Embedding model
     embedding_model = os.getenv("AI_EMBEDDING_MODEL") or "nomic-embed-text"

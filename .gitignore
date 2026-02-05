@@ -59,3 +59,4 @@ build/
 # Root level node_modules (AI SDK installed at root)
 /node_modules/
 /package-lock.json
+/.agents/
