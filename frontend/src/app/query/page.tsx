@@ -1,79 +1,101 @@
 'use client';
 
 import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
-import { queryDocuments, QueryResult } from '@/lib/api';
+import { QueryResult } from '@/lib/api';
 import { useUpload } from '@/context/UploadContext';
 import Link from 'next/link';
+import { cn } from '@/lib/utils';
+
+// AI Elements components
+import {
+  Message,
+  MessageContent,
+  MessageResponse,
+  MessageMetadata,
+  MetadataBadge,
+  StreamingIndicator,
+} from '@/components/ai-elements/message';
+import {
+  Conversation,
+  ConversationContent,
+  ConversationEmptyState,
+} from '@/components/ai-elements/conversation';
+import {
+  PromptInput,
+  PromptInputTextarea,
+  PromptInputFooter,
+  PromptInputTools,
+  PromptInputSubmit,
+} from '@/components/ai-elements/prompt-input';
+import { Source } from '@/components/ai-elements/sources';
+import { Suggestions, Suggestion } from '@/components/ai-elements/suggestion';
+
+import {
+  MessageCircle,
+  Zap,
+  Gauge,
+  Target,
+  Upload,
+  CheckCircle2,
+  Search,
+  RefreshCw,
+  FileText,
+  ChevronDown,
+} from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
 
-// 検索モードの定義
+// Search mode definitions
 type SearchMode = 'fast' | 'standard' | 'accurate';
 
-const SEARCH_MODES: { value: SearchMode; label: string; description: string }[] = [
-  { value: 'fast', label: '高速', description: 'LLM 1回・3件検索' },
-  { value: 'standard', label: '標準', description: 'LLM 2回・5件検索' },
-  { value: 'accurate', label: '高精度', description: 'LLM 2回・7件検索' },
+const SEARCH_MODES: { value: SearchMode; label: string; description: string; icon: typeof Zap }[] = [
+  { value: 'fast', label: '高速', description: 'LLM 1回・3件', icon: Zap },
+  { value: 'standard', label: '標準', description: 'LLM 2回・5件', icon: Gauge },
+  { value: 'accurate', label: '高精度', description: 'LLM 2回・7件', icon: Target },
 ];
 
-// 秒数を「N分N秒」形式にフォーマットする関数
 function formatSearchTime(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return '';
-  if (seconds < 60) {
-    return `${seconds.toFixed(1)}秒`;
-  }
+  if (seconds < 60) return `${seconds.toFixed(1)}秒`;
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return `${minutes}分${remainingSeconds.toFixed(1)}秒`;
 }
 
-interface SourceCardProps {
-  source: {
-    document_name: string;
-    chunk_text: string;
-    similarity: number;
-  };
-  index: number;
-}
+// Suggestions for empty state
+const SUGGESTIONS = [
+  'アップロードしたドキュメントの内容を教えてください',
+  '契約書の重要なポイントは何ですか？',
+  '最新のレポートを要約してください',
+];
 
-function SourceCard({ source, index }: SourceCardProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+// Collapsible Sources component for chat
+function ChatSources({ sources }: { sources: QueryResult['sources'] }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!sources || sources.length === 0) return null;
 
   return (
-    <div
-      className="border rounded-lg overflow-hidden cursor-pointer hover:border-blue-300 transition-colors"
-      onClick={() => setIsExpanded(!isExpanded)}
-    >
-      <div className="flex items-center gap-3 p-3 bg-gray-50">
-        <div className="flex-shrink-0">
-          <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-xs font-medium text-gray-900 truncate">
-            {source.document_name || `Source ${index + 1}`}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500 bg-white px-2 py-0.5 rounded">
-            {(source.similarity * 100).toFixed(0)}%
-          </span>
-          <svg
-            className={`h-3 w-3 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
-        </div>
-      </div>
-      {isExpanded && (
-        <div className="p-3 bg-white border-t">
-          <p className="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">
-            {source.chunk_text || 'No content available'}
-          </p>
+    <div className="pt-2 border-t border-border/50">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+      >
+        <FileText className="w-3.5 h-3.5" />
+        <span>Sources ({sources.length})</span>
+        <ChevronDown className={cn('w-3 h-3 transition-transform', isOpen && 'rotate-180')} />
+      </button>
+      {isOpen && (
+        <div className="mt-2 space-y-1.5 animate-fade-in">
+          {sources.map((source, index) => (
+            <Source
+              key={index}
+              title={source.document_name || `Source ${index + 1}`}
+              similarity={source.similarity}
+              expandable
+              expandedContent={source.chunk_text || 'No content available'}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -87,7 +109,6 @@ interface ChatMessage {
   result?: QueryResult & { mode?: string; from_cache?: boolean };
   isStreaming?: boolean;
   timestamp: Date;
-  /** The original question text (for re-search) */
   questionText?: string;
 }
 
@@ -97,19 +118,10 @@ export default function QueryPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [searchMode, setSearchMode] = useState<SearchMode>('standard');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const { files, isUploading, completedCount, totalCount } = useUpload();
   const hasUploads = files.length > 0;
-
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, []);
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
 
   const handleStreamingQuery = async (questionText: string, messageId: string, mode: SearchMode, skipCache = false) => {
     abortControllerRef.current = new AbortController();
@@ -122,9 +134,7 @@ export default function QueryPage() {
         signal: abortControllerRef.current.signal,
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No response body');
@@ -132,7 +142,7 @@ export default function QueryPage() {
       const decoder = new TextDecoder();
       let accumulatedText = '';
       let sources: QueryResult['sources'] = [];
-      let metadata: Partial<QueryResult & { mode?: string }> = {};
+      let metadata: Partial<QueryResult & { mode?: string; from_cache?: boolean }> = {};
 
       while (true) {
         const { done, value } = await reader.read();
@@ -286,13 +296,8 @@ export default function QueryPage() {
     }
   };
 
-  // モードに応じたバッジの色
-  const getModeColor = (mode: string) => {
-    switch (mode) {
-      case 'fast': return 'bg-orange-100 text-orange-700';
-      case 'accurate': return 'bg-purple-100 text-purple-700';
-      default: return 'bg-gray-100 text-gray-600';
-    }
+  const handleSuggestionClick = (suggestion: string) => {
+    setQuestion(suggestion);
   };
 
   const getModeLabel = (mode: string) => {
@@ -303,231 +308,196 @@ export default function QueryPage() {
     }
   };
 
+  const getModeVariant = (mode: string): 'default' | 'warning' | 'accent' => {
+    switch (mode) {
+      case 'fast': return 'warning';
+      case 'accurate': return 'accent';
+      default: return 'default';
+    }
+  };
+
   return (
     <div className="max-w-3xl mx-auto flex flex-col h-full overflow-hidden">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold">Chat</h1>
-        <div className="flex items-center gap-4">
-          {messages.length > 0 && (
-            <button
-              onClick={clearChat}
-              className="text-sm text-gray-500 hover:text-gray-700"
-            >
-              Clear chat
-            </button>
-          )}
-        </div>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3 flex-shrink-0">
+        <h1 className="text-lg font-semibold text-foreground">Chat</h1>
+        {messages.length > 0 && (
+          <button
+            onClick={clearChat}
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Clear
+          </button>
+        )}
       </div>
 
-      {/* Search Mode Selector */}
-      <div className="mb-4 p-3 bg-gray-50 border rounded-lg">
-        <div className="flex items-center gap-2 mb-2">
-          <svg className="h-4 w-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-          </svg>
-          <span className="text-sm font-medium text-gray-700">検索モード</span>
-        </div>
-        <div className="flex gap-2">
-          {SEARCH_MODES.map((mode) => (
-            <button
-              key={mode.value}
-              onClick={() => setSearchMode(mode.value)}
-              disabled={isLoading}
-              className={`flex-1 px-3 py-2 rounded-lg text-sm transition-all ${
-                searchMode === mode.value
-                  ? 'bg-blue-500 text-white shadow-sm'
-                  : 'bg-white border hover:bg-gray-50 text-gray-700'
-              } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <div className="font-medium">{mode.label}</div>
-              <div className={`text-xs ${searchMode === mode.value ? 'text-blue-100' : 'text-gray-500'}`}>
-                {mode.description}
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Upload Status Banner */}
+      {/* Upload Banners */}
       {hasUploads && isUploading && (
-        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-          <div className="flex items-center gap-3">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-            <div className="flex-1">
-              <p className="text-blue-700 text-sm font-medium">
-                Uploading files ({completedCount}/{totalCount})
-              </p>
-            </div>
+        <div className="mb-3 p-2.5 bg-primary/5 border border-primary/20 rounded-xl flex-shrink-0 animate-fade-in">
+          <div className="flex items-center gap-2.5">
+            <Upload className="w-4 h-4 text-primary animate-pulse" />
+            <p className="text-primary text-sm font-medium">
+              Uploading files ({completedCount}/{totalCount})
+            </p>
           </div>
         </div>
       )}
-
-      {/* Upload Complete Banner */}
       {hasUploads && !isUploading && completedCount > 0 && (
-        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+        <div className="mb-3 p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex-shrink-0 animate-fade-in">
           <div className="flex items-center justify-between">
-            <p className="text-green-700 text-sm font-medium">
-              {completedCount} file{completedCount > 1 ? 's' : ''} ready
-            </p>
-            <Link
-              href="/"
-              className="text-xs text-green-600 hover:text-green-800 underline"
-            >
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+              <p className="text-emerald-700 text-sm font-medium">
+                {completedCount} file{completedCount > 1 ? 's' : ''} ready
+              </p>
+            </div>
+            <Link href="/" className="text-xs text-emerald-600 hover:text-emerald-800 transition-colors">
               Upload more
             </Link>
           </div>
         </div>
       )}
 
-      {/* Chat Messages */}
-      <div className="flex-1 min-h-0 overflow-y-auto mb-4 space-y-4">
-        {messages.length === 0 && !isLoading && (
-          <div className="text-center py-12 text-gray-500">
-            <svg
-              className="mx-auto h-12 w-12 text-gray-400 mb-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+      {/* Conversation Area */}
+      <Conversation className="flex-1 min-h-0">
+        <ConversationContent>
+          {messages.length === 0 && !isLoading ? (
+            <ConversationEmptyState
+              icon={<MessageCircle className="w-12 h-12" />}
+              title="ドキュメントに質問する"
+              description="アップロードしたドキュメントについて何でも聞いてください"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-              />
-            </svg>
-            <p>Start a conversation by asking a question</p>
-          </div>
-        )}
+              <Suggestions className="mt-4">
+                {SUGGESTIONS.map((s) => (
+                  <Suggestion key={s} suggestion={s} onSelect={handleSuggestionClick} />
+                ))}
+              </Suggestions>
+            </ConversationEmptyState>
+          ) : (
+            <>
+              {messages.map((message) => (
+                <Message key={message.id} from={message.type === 'user' ? 'user' : 'assistant'}>
+                  <MessageContent>
+                    {message.type === 'user' ? (
+                      <MessageResponse>{message.content}</MessageResponse>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {/* Answer text */}
+                        <MessageResponse>
+                          {message.content}
+                          {message.isStreaming && <StreamingIndicator />}
+                        </MessageResponse>
 
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-[85%] ${
-                message.type === 'user'
-                  ? 'bg-blue-500 text-white rounded-2xl rounded-br-md px-4 py-3'
-                  : 'bg-white border rounded-2xl rounded-bl-md px-4 py-3 shadow-sm'
-              }`}
-            >
-              {message.type === 'user' ? (
-                <p className="text-sm">{message.content}</p>
-              ) : (
-                <div className="space-y-3">
-                  {/* Answer */}
-                  <p className="text-sm text-gray-800 whitespace-pre-wrap">
-                    {message.content}
-                    {message.isStreaming && (
-                      <span className="inline-block w-2 h-4 ml-1 bg-blue-500 animate-pulse" />
-                    )}
-                  </p>
+                        {/* Metadata badges */}
+                        {message.result && !message.isStreaming && (
+                          <MessageMetadata>
+                            <MetadataBadge variant={message.result.has_answer ? 'success' : 'warning'}>
+                              {message.result.has_answer ? 'Found' : 'Not Found'}
+                            </MetadataBadge>
+                            <MetadataBadge>
+                              {(message.result.confidence * 100).toFixed(0)}%
+                            </MetadataBadge>
+                            {message.result.search_time_seconds != null && (
+                              <MetadataBadge variant="info">
+                                {formatSearchTime(message.result.search_time_seconds)}
+                              </MetadataBadge>
+                            )}
+                            {message.result.mode && (
+                              <MetadataBadge variant={getModeVariant(message.result.mode)}>
+                                {getModeLabel(message.result.mode)}
+                              </MetadataBadge>
+                            )}
+                            {message.result.from_cache && (
+                              <>
+                                <MetadataBadge variant="info">
+                                  キャッシュ
+                                </MetadataBadge>
+                                <button
+                                  onClick={() => message.questionText && handleResearch(message.questionText)}
+                                  disabled={isLoading}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full border border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <RefreshCw className="w-3 h-3" />
+                                  再検索
+                                </button>
+                              </>
+                            )}
+                          </MessageMetadata>
+                        )}
 
-                  {/* Confidence & Status */}
-                  {message.result && !message.isStreaming && (
-                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100">
-                      <span className={`px-2 py-0.5 text-xs rounded ${message.result.has_answer ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                        {message.result.has_answer ? 'Found' : 'Not Found'}
-                      </span>
-                      <span className="px-2 py-0.5 text-xs rounded bg-gray-100 text-gray-600">
-                        {(message.result.confidence * 100).toFixed(0)}% confidence
-                      </span>
-                      {message.result.search_time_seconds != null && (
-                        <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">
-                          {formatSearchTime(message.result.search_time_seconds)}
-                        </span>
-                      )}
-                      {message.result.mode && (
-                        <span className={`px-2 py-0.5 text-xs rounded ${getModeColor(message.result.mode)}`}>
-                          {getModeLabel(message.result.mode)}
-                        </span>
-                      )}
-                      {message.result.from_cache && (
-                        <>
-                          <span className="px-2 py-0.5 text-xs rounded bg-cyan-100 text-cyan-700">
-                            キャッシュ
-                          </span>
-                          <button
-                            onClick={() => message.questionText && handleResearch(message.questionText)}
-                            disabled={isLoading}
-                            className="px-2 py-0.5 text-xs rounded bg-indigo-100 text-indigo-700 hover:bg-indigo-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            再検索
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  )}
+                        {/* Sources */}
+                        {message.result?.sources && message.result.sources.length > 0 && (
+                          <ChatSources sources={message.result.sources} />
+                        )}
 
-                  {/* Sources */}
-                  {message.result?.sources && message.result.sources.length > 0 && (
-                    <div className="pt-2 border-t border-gray-100">
-                      <p className="text-xs text-gray-500 mb-2">Sources ({message.result.sources.length})</p>
-                      <div className="space-y-2">
-                        {message.result.sources.map((source, index) => (
-                          <SourceCard key={index} source={source} index={index} />
-                        ))}
+                        {/* API Error */}
+                        {message.result?.error && (
+                          <p className="text-xs text-amber-600 pt-2 border-t border-border/50">
+                            {message.result.error}
+                          </p>
+                        )}
                       </div>
-                    </div>
-                  )}
+                    )}
+                  </MessageContent>
+                </Message>
+              ))}
 
-                  {/* Error from API */}
-                  {message.result?.error && (
-                    <p className="text-xs text-amber-600 pt-2 border-t border-gray-100">
-                      {message.result.error}
-                    </p>
-                  )}
+              {/* Error */}
+              {error && (
+                <div className="p-3 bg-destructive/5 border border-destructive/20 rounded-xl animate-fade-in">
+                  <p className="text-destructive text-sm">{error}</p>
                 </div>
               )}
-            </div>
-          </div>
-        ))}
+            </>
+          )}
+        </ConversationContent>
+      </Conversation>
 
-        {/* Error */}
-        {error && (
-          <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
-            <p className="text-red-600 text-sm">{error}</p>
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Question Form */}
-      <form onSubmit={handleSubmit} className="border-t pt-4">
-        <div className="flex gap-3">
-          <input
-            type="text"
+      {/* Input Area */}
+      <div className="flex-shrink-0 pt-3">
+        <PromptInput onSubmit={handleSubmit}>
+          <PromptInputTextarea
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Ask a question..."
-            className="flex-1 px-4 py-3 border rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="質問を入力してください..."
             disabled={isLoading}
           />
-          {isLoading ? (
-            <button
-              type="button"
-              onClick={handleCancel}
-              className="px-6 py-3 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors"
-            >
-              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          ) : (
-            <button
-              type="submit"
+          <PromptInputFooter>
+            <PromptInputTools>
+              {/* Search Mode Selector */}
+              <div className="flex items-center gap-0.5 bg-secondary/50 rounded-lg p-0.5">
+                {SEARCH_MODES.map((mode) => {
+                  const Icon = mode.icon;
+                  return (
+                    <button
+                      key={mode.value}
+                      type="button"
+                      onClick={() => setSearchMode(mode.value)}
+                      disabled={isLoading}
+                      className={cn(
+                        'flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all',
+                        searchMode === mode.value
+                          ? 'bg-card text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground',
+                        isLoading && 'opacity-50 cursor-not-allowed'
+                      )}
+                      title={mode.description}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {mode.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </PromptInputTools>
+            <PromptInputSubmit
+              status={isLoading ? 'streaming' : 'ready'}
               disabled={!question.trim()}
-              className="px-6 py-3 bg-blue-500 text-white rounded-full hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-              </svg>
-            </button>
-          )}
-        </div>
-      </form>
+              onClick={isLoading ? handleCancel : undefined}
+            />
+          </PromptInputFooter>
+        </PromptInput>
+      </div>
     </div>
   );
 }

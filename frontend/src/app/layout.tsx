@@ -5,7 +5,7 @@ import Providers from "@/components/Providers";
 
 export const metadata: Metadata = {
   title: "AI Agent",
-  description: "AI Agent Frontend",
+  description: "AI Agent - Document Intelligence",
 };
 
 export default function RootLayout({
@@ -15,10 +15,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ja" className="h-full">
-      <body className="bg-gray-50 h-full flex flex-col">
+      <body className="h-full flex flex-col antialiased">
         <Providers>
           <Navigation />
-          <main className="flex-1 overflow-hidden max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <main className="flex-1 overflow-hidden w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
             {children}
           </main>
         </Providers>

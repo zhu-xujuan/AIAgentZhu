@@ -4,70 +4,58 @@ import { useState, useCallback, useEffect } from 'react';
 import { ingestFile } from '@/lib/api';
 import { useUpload, FileUploadState } from '@/context/UploadContext';
 import FileList from '@/components/FileList';
+import { cn } from '@/lib/utils';
+import {
+  Upload,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Clock,
+  X,
+  FileUp,
+} from 'lucide-react';
 
 function UploadProgress({ fileState }: { fileState: FileUploadState }) {
   const { status, progress, file, result, error } = fileState;
 
-  const statusColors = {
-    pending: 'bg-gray-200',
-    uploading: 'bg-blue-500',
-    completed: 'bg-green-500',
-    error: 'bg-red-500',
+  const statusConfig = {
+    pending: { color: 'bg-muted', icon: <Clock className="w-3.5 h-3.5 text-muted-foreground" /> },
+    uploading: { color: 'bg-primary', icon: <Loader2 className="w-3.5 h-3.5 text-primary animate-spin" /> },
+    completed: { color: 'bg-emerald-500', icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> },
+    error: { color: 'bg-destructive', icon: <XCircle className="w-3.5 h-3.5 text-destructive" /> },
   };
 
-  const statusIcons = {
-    pending: (
-      <div className="h-3 w-3 rounded-full border-2 border-gray-300"></div>
-    ),
-    uploading: (
-      <div className="animate-spin rounded-full h-3 w-3 border-2 border-blue-500 border-t-transparent"></div>
-    ),
-    completed: (
-      <svg className="h-3 w-3 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-      </svg>
-    ),
-    error: (
-      <svg className="h-3 w-3 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-      </svg>
-    ),
-  };
+  const config = statusConfig[status];
 
   return (
-    <div className="p-2 bg-white border rounded">
-      {/* File Name and Icon */}
-      <div className="flex items-center gap-2 mb-1">
-        <div className="flex-shrink-0">
-          {statusIcons[status]}
-        </div>
-        <p className="text-xs font-medium text-gray-900 truncate flex-1">
+    <div className="p-2.5 bg-card border border-border rounded-lg">
+      <div className="flex items-center gap-2.5 mb-1.5">
+        <div className="flex-shrink-0">{config.icon}</div>
+        <p className="text-xs font-medium text-foreground truncate flex-1">
           {file.name}
         </p>
-        <span className="text-xs text-gray-400 flex-shrink-0">
+        <span className="text-[10px] text-muted-foreground flex-shrink-0">
           {(file.size / 1024).toFixed(0)}KB
         </span>
       </div>
 
-      {/* Progress Bar */}
-      <div className="h-1 w-full bg-gray-100 rounded-full overflow-hidden mb-1">
+      <div className="h-1 w-full bg-secondary rounded-full overflow-hidden mb-1.5">
         <div
-          className={`h-full transition-all duration-300 ${statusColors[status]}`}
+          className={cn('h-full transition-all duration-300 rounded-full', config.color)}
           style={{ width: `${progress}%` }}
         />
       </div>
 
-      {/* Status Text */}
-      <p className="text-xs">
-        {status === 'pending' && <span className="text-gray-500">Waiting...</span>}
-        {status === 'uploading' && <span className="text-blue-600">{progress}%</span>}
+      <p className="text-[11px]">
+        {status === 'pending' && <span className="text-muted-foreground">Waiting...</span>}
+        {status === 'uploading' && <span className="text-primary font-medium">{progress}%</span>}
         {status === 'completed' && (
-          <span className="text-green-600">
+          <span className="text-emerald-600">
             {result?.is_duplicate ? 'Exists' : `${result?.chunks_count} chunks`}
           </span>
         )}
         {status === 'error' && (
-          <span className="text-red-600 truncate block" title={error}>
+          <span className="text-destructive truncate block" title={error || undefined}>
             {error}
           </span>
         )}
@@ -96,48 +84,21 @@ export default function UploadPage() {
   useEffect(() => {
     const processQueue = async () => {
       const pendingFile = files.find((f) => f.status === 'pending');
-      if (!pendingFile) {
-        console.log('[UploadQueue] No pending files in queue');
-        return;
-      }
+      if (!pendingFile) return;
 
       const uploadingFile = files.find((f) => f.status === 'uploading');
-      if (uploadingFile) {
-        console.log('[UploadQueue] Already uploading:', uploadingFile.file.name);
-        return; // Only one at a time
-      }
-
-      console.log('[UploadQueue] Starting upload for:', {
-        id: pendingFile.id,
-        fileName: pendingFile.file.name,
-        fileSize: pendingFile.file.size,
-        fileType: pendingFile.file.type,
-      });
+      if (uploadingFile) return;
 
       updateFileStatus(pendingFile.id, 'uploading', 10);
 
       try {
-        // Simulate progress stages
-        console.log('[UploadQueue] Progress: 30% - Sending to API...');
         updateFileStatus(pendingFile.id, 'uploading', 30);
         const result = await ingestFile(pendingFile.file);
-        console.log('[UploadQueue] Progress: 90% - Processing complete');
         updateFileStatus(pendingFile.id, 'uploading', 90);
-        console.log('[UploadQueue] Upload completed successfully:', {
-          fileName: pendingFile.file.name,
-          fileId: result.file_id,
-          documentId: result.document_id,
-          isDuplicate: result.is_duplicate,
-        });
         setFileResult(pendingFile.id, result);
         setRefreshTrigger((prev) => prev + 1);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Upload failed';
-        console.error('[UploadQueue] Upload failed:', {
-          fileName: pendingFile.file.name,
-          error: errorMessage,
-          fullError: err,
-        });
         setFileError(pendingFile.id, errorMessage);
       }
     };
@@ -158,14 +119,8 @@ export default function UploadPage() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-
     const droppedFiles = Array.from(e.dataTransfer.files);
     if (droppedFiles.length > 0) {
-      console.log('[FileSelect] Files dropped:', droppedFiles.map(f => ({
-        name: f.name,
-        size: f.size,
-        type: f.type,
-      })));
       addFiles(droppedFiles);
     }
   }, [addFiles]);
@@ -173,15 +128,8 @@ export default function UploadPage() {
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = e.target.files;
     if (selectedFiles && selectedFiles.length > 0) {
-      const filesArray = Array.from(selectedFiles);
-      console.log('[FileSelect] Files selected:', filesArray.map(f => ({
-        name: f.name,
-        size: f.size,
-        type: f.type,
-      })));
-      addFiles(filesArray);
+      addFiles(Array.from(selectedFiles));
     }
-    // Reset input
     e.target.value = '';
   }, [addFiles]);
 
@@ -189,44 +137,48 @@ export default function UploadPage() {
     <div className="h-full flex gap-6">
       {/* Left Side - Uploaded Documents */}
       <div className="flex-1 flex flex-col min-h-0">
-        <h2 className="text-xl font-bold mb-4">Uploaded Documents</h2>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex items-center gap-2 mb-4">
+          <h2 className="text-lg font-semibold text-foreground">Documents</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin">
           <FileList refreshTrigger={refreshTrigger} />
         </div>
       </div>
 
       {/* Right Side - Upload Area */}
       <div className="w-96 flex flex-col min-h-0">
-        <h2 className="text-xl font-bold mb-4">Upload Files</h2>
+        <div className="flex items-center gap-2 mb-4">
+          <Upload className="w-4 h-4 text-muted-foreground" />
+          <h2 className="text-lg font-semibold text-foreground">Upload</h2>
+        </div>
 
-        {/* Drop Zone - Compact */}
+        {/* Drop Zone */}
         <div
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className={`
-            border-2 border-dashed rounded-lg p-6 text-center transition-colors flex-shrink-0
-            ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}
-          `}
+          className={cn(
+            'border-2 border-dashed rounded-xl p-8 text-center transition-all flex-shrink-0',
+            isDragging
+              ? 'border-primary bg-primary/5 scale-[1.01]'
+              : 'border-border hover:border-muted-foreground/30 bg-card'
+          )}
         >
-          <svg
-            className="mx-auto h-10 w-10 text-gray-400 mb-3"
-            stroke="currentColor"
-            fill="none"
-            viewBox="0 0 48 48"
-          >
-            <path
-              d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <p className="text-sm text-gray-600 mb-3">
+          <div className={cn(
+            'mx-auto w-12 h-12 rounded-xl flex items-center justify-center mb-3 transition-colors',
+            isDragging ? 'bg-primary/10' : 'bg-secondary'
+          )}>
+            <FileUp className={cn(
+              'w-6 h-6 transition-colors',
+              isDragging ? 'text-primary' : 'text-muted-foreground'
+            )} />
+          </div>
+          <p className="text-sm text-muted-foreground mb-3">
             Drag files here or click to select
           </p>
           <label className="cursor-pointer">
-            <span className="inline-block px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors text-sm">
+            <span className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors text-sm font-medium shadow-sm">
+              <Upload className="w-4 h-4" />
               Select Files
             </span>
             <input
@@ -237,7 +189,7 @@ export default function UploadPage() {
               multiple
             />
           </label>
-          <p className="text-xs text-gray-400 mt-2">
+          <p className="text-[11px] text-muted-foreground/70 mt-3">
             .txt, .csv, .json, .md, .pdf
           </p>
         </div>
@@ -246,49 +198,49 @@ export default function UploadPage() {
         {files.length > 0 && (
           <div className="mt-4 flex-1 flex flex-col min-h-0">
             <div className="flex items-center justify-between mb-3 flex-shrink-0">
-              <h3 className="text-sm font-semibold text-gray-700">
+              <h3 className="text-sm font-medium text-foreground">
                 Progress {totalCount > 0 && `(${completedCount}/${totalCount})`}
               </h3>
               {completedCount > 0 && !isUploading && (
                 <button
                   onClick={clearCompleted}
-                  className="text-xs text-gray-500 hover:text-gray-700"
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Clear
                 </button>
               )}
             </div>
 
-            {/* Overall Progress Bar - Compact */}
+            {/* Overall Progress Bar */}
             {totalCount > 0 && (
-              <div className="mb-3 p-2 bg-blue-50 border border-blue-200 rounded flex-shrink-0">
-                <div className="flex items-center justify-between text-xs text-blue-700 mb-1">
-                  <span className="font-medium">Overall</span>
-                  <span className="font-semibold">{Math.round((completedCount / totalCount) * 100)}%</span>
+              <div className="mb-3 p-2.5 bg-primary/5 border border-primary/20 rounded-lg flex-shrink-0">
+                <div className="flex items-center justify-between text-xs mb-1.5">
+                  <span className="font-medium text-primary">Overall</span>
+                  <span className="font-semibold text-primary">
+                    {Math.round((completedCount / totalCount) * 100)}%
+                  </span>
                 </div>
-                <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden">
+                <div className="h-1.5 bg-primary/10 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-blue-500 transition-all duration-300"
+                    className="h-full bg-primary rounded-full transition-all duration-300"
                     style={{ width: `${(completedCount / totalCount) * 100}%` }}
                   />
                 </div>
               </div>
             )}
 
-            {/* File List - Compact & Scrollable */}
-            <div className="space-y-2 overflow-y-auto flex-1 min-h-0">
+            {/* File List */}
+            <div className="space-y-2 overflow-y-auto flex-1 min-h-0 scrollbar-thin">
               {files.map((fileState) => (
-                <div key={fileState.id} className="relative">
+                <div key={fileState.id} className="relative group">
                   <UploadProgress fileState={fileState} />
                   {(fileState.status === 'completed' || fileState.status === 'error') && (
                     <button
                       onClick={() => removeFile(fileState.id)}
-                      className="absolute top-1 right-1 p-0.5 text-gray-400 hover:text-gray-600 bg-white rounded"
+                      className="absolute top-1.5 right-1.5 p-0.5 text-muted-foreground hover:text-foreground bg-card rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
                       title="Remove"
                     >
-                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                      <X className="w-3 h-3" />
                     </button>
                   )}
                 </div>

@@ -2,33 +2,31 @@
 
 import { useEffect, useState } from 'react';
 import { getDocumentDetail, DocumentDetail } from '@/lib/api';
+import { cn } from '@/lib/utils';
+import { X, Loader2, AlertCircle } from 'lucide-react';
+
+const docTypeStyles: Record<string, string> = {
+  contract: 'bg-violet-50 text-violet-700 border-violet-200',
+  invoice: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  report: 'bg-sky-50 text-sky-700 border-sky-200',
+  manual: 'bg-amber-50 text-amber-700 border-amber-200',
+  meeting_minutes: 'bg-orange-50 text-orange-700 border-orange-200',
+  minutes: 'bg-orange-50 text-orange-700 border-orange-200',
+};
+
+function getDocTypeBadge(docType: string | null) {
+  if (!docType) return null;
+  const style = docTypeStyles[docType] || 'bg-secondary text-secondary-foreground border-border';
+  return (
+    <span className={cn('px-2 py-0.5 text-[11px] font-medium rounded-full border', style)}>
+      {docType}
+    </span>
+  );
+}
 
 interface DocumentDetailModalProps {
   documentId: number | null;
   onClose: () => void;
-}
-
-function getDocTypeBadge(docType: string | null) {
-  if (!docType) return null;
-
-  const colors: Record<string, string> = {
-    contract: 'bg-purple-100 text-purple-700',
-    invoice: 'bg-green-100 text-green-700',
-    report: 'bg-blue-100 text-blue-700',
-    manual: 'bg-yellow-100 text-yellow-700',
-    meeting_minutes: 'bg-orange-100 text-orange-700',
-    minutes: 'bg-orange-100 text-orange-700',
-    other: 'bg-gray-100 text-gray-700',
-    unknown: 'bg-gray-100 text-gray-700',
-  };
-
-  const color = colors[docType] || colors.other;
-
-  return (
-    <span className={`px-2 py-1 text-xs rounded-full ${color}`}>
-      {docType}
-    </span>
-  );
 }
 
 export default function DocumentDetailModal({ documentId, onClose }: DocumentDetailModalProps) {
@@ -57,84 +55,84 @@ export default function DocumentDetailModal({ documentId, onClose }: DocumentDet
 
   if (documentId === null) return null;
 
-  // 背景クリックで閉じる
   const handleBackdropClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) {
-      onClose();
-    }
+    if (e.target === e.currentTarget) onClose();
   };
 
   return (
     <div
-      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in"
       onClick={handleBackdropClick}
     >
-      <div className="bg-white rounded-xl shadow-2xl w-[600px] h-[500px] flex flex-col m-4">
+      <div className="bg-card rounded-2xl shadow-2xl w-[600px] h-[500px] flex flex-col m-4 border border-border">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-          <h2 className="text-base font-semibold text-gray-900 truncate pr-4">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <h2 className="text-sm font-semibold text-foreground truncate pr-4">
             {loading ? 'Loading...' : document?.file_name || 'Document Detail'}
           </h2>
           <button
             onClick={onClose}
-            className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-1.5 hover:bg-accent rounded-lg transition-colors"
           >
-            <svg className="h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-4 h-4 text-muted-foreground" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="flex-1 overflow-y-auto p-5 scrollbar-thin">
           {loading && (
             <div className="flex items-center justify-center py-16">
-              <div className="animate-spin rounded-full h-6 w-6 border-2 border-blue-500 border-t-transparent"></div>
+              <Loader2 className="w-5 h-5 text-primary animate-spin" />
             </div>
           )}
 
           {error && (
-            <div className="p-4 bg-red-50 border border-red-100 rounded-lg">
-              <p className="text-red-600 text-sm">{error}</p>
+            <div className="p-4 bg-destructive/5 border border-destructive/20 rounded-xl">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-destructive" />
+                <p className="text-destructive text-sm">{error}</p>
+              </div>
             </div>
           )}
 
           {!loading && !error && document && (
             <div className="space-y-5">
               {/* Metadata */}
-              <div className="flex flex-wrap items-center gap-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2.5">
                 {getDocTypeBadge(document.doc_type)}
                 {document.language && (
-                  <span className="text-gray-500">{document.language}</span>
+                  <span className="text-xs text-muted-foreground">{document.language}</span>
                 )}
                 {document.confidence !== null && (
-                  <span className="text-gray-500">
+                  <span className="text-xs text-muted-foreground">
                     確度 {(document.confidence * 100).toFixed(0)}%
                   </span>
                 )}
-                <span className="text-gray-400">
+                <span className="text-xs text-muted-foreground">
                   {document.total_chunks} chunks
                 </span>
               </div>
 
               {/* Content */}
               <div>
-                <h3 className="text-sm font-medium text-gray-600 mb-3">Content</h3>
+                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
+                  Content
+                </h3>
                 {document.chunks.length === 0 ? (
-                  <div className="text-gray-400 text-center py-8 text-sm">
+                  <div className="text-muted-foreground text-center py-8 text-sm">
                     No content available
                   </div>
                 ) : (
-                  <div className="bg-gray-50 rounded-lg p-4 max-h-[400px] overflow-y-auto">
+                  <div className="bg-secondary/50 rounded-xl p-4 max-h-[350px] overflow-y-auto scrollbar-thin">
                     <div className="space-y-4">
                       {document.chunks.map((chunk, idx) => (
                         <div key={idx}>
-                          {idx > 0 && <hr className="border-gray-200 my-4" />}
-                          <div className="text-xs text-gray-400 mb-2">
+                          {idx > 0 && <hr className="border-border my-4" />}
+                          <div className="text-[10px] text-muted-foreground mb-2 uppercase tracking-wider">
                             Chunk {chunk.index + 1}
                             {chunk.page && ` / Page ${chunk.page}`}
                           </div>
-                          <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                          <p className="text-sm text-foreground/80 whitespace-pre-wrap leading-relaxed">
                             {chunk.text}
                           </p>
                         </div>
