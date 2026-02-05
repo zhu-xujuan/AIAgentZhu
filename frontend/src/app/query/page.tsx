@@ -29,6 +29,7 @@ import {
 } from '@/components/ai-elements/prompt-input';
 import { Source } from '@/components/ai-elements/sources';
 import { Suggestions, Suggestion } from '@/components/ai-elements/suggestion';
+import { SlideStudio, type SlideDeck } from '@/components/ai-elements/slide-studio';
 
 import {
   MessageCircle,
@@ -40,10 +41,11 @@ import {
   Search,
   RefreshCw,
   FileText,
+  Presentation,
   ChevronDown,
 } from 'lucide-react';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 // Search mode definitions
 type SearchMode = 'fast' | 'standard' | 'accurate';
@@ -120,8 +122,35 @@ export default function QueryPage() {
   const [searchMode, setSearchMode] = useState<SearchMode>('standard');
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  const [activeSlideMessageId, setActiveSlideMessageId] = useState<string | null>(null);
+  const [slideDecks, setSlideDecks] = useState<
+    Record<string, { question: string; mode: SearchMode; deck: SlideDeck }>
+  >({});
+  const [slideBusyMessageId, setSlideBusyMessageId] = useState<string | null>(null);
+  const [slideError, setSlideError] = useState<string | null>(null);
+
   const { files, isUploading, completedCount, totalCount } = useUpload();
   const hasUploads = files.length > 0;
+
+  const withSlideIds = useCallback((deck: SlideDeck, prefix: string): SlideDeck => {
+    return {
+      ...deck,
+      slides: (deck.slides || []).map((s, idx) => ({
+        ...s,
+        id: s.id || `${prefix}-${idx}`,
+      })),
+    };
+  }, []);
+
+  const openSlideStudio = useCallback((messageId: string) => {
+    setSlideError(null);
+    setActiveSlideMessageId(messageId);
+  }, []);
+
+  const closeSlideStudio = useCallback(() => {
+    setActiveSlideMessageId(null);
+    setSlideError(null);
+  }, []);
 
   const handleStreamingQuery = async (questionText: string, messageId: string, mode: SearchMode, skipCache = false) => {
     abortControllerRef.current = new AbortController();
@@ -296,6 +325,86 @@ export default function QueryPage() {
     }
   };
 
+  const handleGenerateSlides = useCallback(async (message: ChatMessage) => {
+    const questionText = message.questionText || message.result?.question;
+    if (!questionText) return;
+
+    const existing = slideDecks[message.id];
+    if (existing) {
+      openSlideStudio(message.id);
+      return;
+    }
+
+    setSlideBusyMessageId(message.id);
+    setSlideError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/pipeline/slides/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: questionText,
+          answer: message.content,
+          mode: (message.result?.mode as SearchMode | undefined) || searchMode,
+          max_slides: 8,
+        }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+      const data = await response.json();
+
+      const deck = withSlideIds(data.deck as SlideDeck, `deck-${message.id}`);
+      const mode = (data.mode as SearchMode | undefined) || searchMode;
+
+      setSlideDecks((prev) => ({
+        ...prev,
+        [message.id]: { question: data.question || questionText, mode, deck },
+      }));
+
+      openSlideStudio(message.id);
+    } catch (err) {
+      setSlideError(err instanceof Error ? err.message : 'Slide generation failed');
+    } finally {
+      setSlideBusyMessageId(null);
+    }
+  }, [openSlideStudio, searchMode, slideDecks, withSlideIds]);
+
+  const handleRefineSlides = useCallback(async (instruction: string) => {
+    if (!activeSlideMessageId) return;
+    const current = slideDecks[activeSlideMessageId];
+    if (!current) return;
+
+    setSlideBusyMessageId(activeSlideMessageId);
+    setSlideError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/pipeline/slides/refine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: current.question,
+          instruction,
+          deck: current.deck,
+          mode: current.mode,
+          max_slides: 8,
+        }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+      const data = await response.json();
+      const deck = withSlideIds(data.deck as SlideDeck, `deck-${activeSlideMessageId}`);
+
+      setSlideDecks((prev) => ({
+        ...prev,
+        [activeSlideMessageId]: { ...prev[activeSlideMessageId], deck },
+      }));
+    } catch (err) {
+      setSlideError(err instanceof Error ? err.message : 'Slide refine failed');
+    } finally {
+      setSlideBusyMessageId(null);
+    }
+  }, [activeSlideMessageId, slideDecks, withSlideIds]);
+
   const handleSuggestionClick = (suggestion: string) => {
     setQuestion(suggestion);
   };
@@ -315,6 +424,8 @@ export default function QueryPage() {
       default: return 'default';
     }
   };
+
+  const activeSlideState = activeSlideMessageId ? slideDecks[activeSlideMessageId] : null;
 
   return (
     <div className="max-w-3xl mx-auto flex flex-col h-full overflow-hidden">
@@ -407,6 +518,19 @@ export default function QueryPage() {
                                 {getModeLabel(message.result.mode)}
                               </MetadataBadge>
                             )}
+                            <button
+                              onClick={() => handleGenerateSlides(message)}
+                              disabled={isLoading || slideBusyMessageId === message.id}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full border border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="回答からスライド資料を作成"
+                            >
+                              {slideBusyMessageId === message.id ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Presentation className="w-3 h-3" />
+                              )}
+                              スライド
+                            </button>
                             {message.result.from_cache && (
                               <>
                                 <MetadataBadge variant="info">
@@ -498,6 +622,26 @@ export default function QueryPage() {
           </PromptInputFooter>
         </PromptInput>
       </div>
+
+      {activeSlideState && (
+        <SlideStudio
+          open={true}
+          deck={activeSlideState.deck}
+          busy={slideBusyMessageId === activeSlideMessageId}
+          error={slideError}
+          onClose={closeSlideStudio}
+          onDeckChange={(next) => {
+            if (!activeSlideMessageId) return;
+            setSlideDecks((prev) => ({
+              ...prev,
+              [activeSlideMessageId]: prev[activeSlideMessageId]
+                ? { ...prev[activeSlideMessageId], deck: next }
+                : { question: activeSlideState.question, mode: activeSlideState.mode, deck: next },
+            }));
+          }}
+          onRequestRefine={(instruction) => handleRefineSlides(instruction)}
+        />
+      )}
     </div>
   );
 }

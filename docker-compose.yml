@@ -27,14 +27,30 @@ services:
     env_file:
       - ./backend/.env.docker
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
       - ./backend:/app
       - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8001 --reload
+    networks:
+      - aiagent-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aiagent-frontend
+    environment:
+      # Use internal backend URL for Next.js rewrites/API routes.
+      BACKEND_URL: http://backend:8001
+      # Intentionally omit NEXT_PUBLIC_API_URL to use same-origin proxying via rewrites.
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
     networks:
       - aiagent-network
 

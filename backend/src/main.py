@@ -38,6 +38,14 @@ from src.agents.sql_query_agent import parse_question, parse_question_async
 from src.agents.answer_formatter import format_facts, format_facts_async
 from src.agents.qa_agent import answer_question
 from src.agents.intent_router import IntentRouter, router_response_to_dict
+from src.agents.slide_agent import (
+    SLIDE_SYSTEM_PROMPT,
+    build_generate_slide_prompt,
+    build_refine_slide_prompt,
+    format_slide_sources_for_prompt,
+    normalize_slide_deck,
+    retrieve_sources_for_slides,
+)
 from src.llm.ai_client import AIClient
 from src.llm.config import get_llm_config, LLMConfig
 
@@ -188,6 +196,23 @@ class QueryRequest(BaseModel):
     question: str
     mode: Optional[str] = "standard"  # "fast", "standard", "accurate"
     skip_cache: Optional[bool] = False  # True to force re-search
+
+
+class SlideDeckGenerateRequest(BaseModel):
+    question: str
+    answer: Optional[str] = None
+    mode: Optional[str] = "standard"  # "fast", "standard", "accurate"
+    max_slides: Optional[int] = 8
+    top_k: Optional[int] = None
+
+
+class SlideDeckRefineRequest(BaseModel):
+    question: str
+    instruction: str
+    deck: dict
+    mode: Optional[str] = "standard"
+    max_slides: Optional[int] = 8
+    top_k: Optional[int] = None
 
 
 class FormatRequest(BaseModel):
@@ -1506,6 +1531,122 @@ async def chat_stream(request: QueryRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/pipeline/slides/generate")
+async def generate_slides(request: SlideDeckGenerateRequest):
+    """
+    Generate a slide deck grounded in retrieved document context.
+    Returns JSON suitable for an in-app slide editor.
+    """
+    import time
+
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not ollama_client:
+        raise HTTPException(status_code=503, detail="LLM not available")
+
+    started = time.time()
+    question = request.question
+    mode = request.mode or "standard"
+    max_slides = int(request.max_slides or 8)
+    max_slides = max(1, min(max_slides, 20))
+
+    try:
+        search_results = await retrieve_sources_for_slides(
+            question=question,
+            mode=mode,
+            db_service=db_service,
+            ai_client=ollama_client,
+            top_k_override=request.top_k,
+        )
+        sources_for_prompt = format_slide_sources_for_prompt(search_results)
+
+        prompt = build_generate_slide_prompt(
+            question=question,
+            answer=request.answer,
+            sources=sources_for_prompt,
+            max_slides=max_slides,
+        )
+
+        deck_raw, err = await ollama_client.generate_json(
+            prompt=prompt,
+            temperature=0.2,
+            system=SLIDE_SYSTEM_PROMPT,
+        )
+        if err or deck_raw is None:
+            raise RuntimeError(err or "Failed to generate slide deck JSON")
+
+        deck = normalize_slide_deck(deck_raw)
+
+        return {
+            "question": question,
+            "deck": deck,
+            "sources": sources_for_prompt,
+            "mode": mode,
+            "generation_time_seconds": round(time.time() - started, 2),
+        }
+    except Exception as e:
+        logger.error(f"[SLIDES] Generate failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/refine")
+async def refine_slides(request: SlideDeckRefineRequest):
+    """
+    Refine an existing slide deck using an instruction, grounded in documents.
+    """
+    import time
+
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not ollama_client:
+        raise HTTPException(status_code=503, detail="LLM not available")
+
+    started = time.time()
+    question = request.question
+    mode = request.mode or "standard"
+    max_slides = int(request.max_slides or 8)
+    max_slides = max(1, min(max_slides, 20))
+
+    try:
+        search_results = await retrieve_sources_for_slides(
+            question=question,
+            mode=mode,
+            db_service=db_service,
+            ai_client=ollama_client,
+            top_k_override=request.top_k,
+        )
+        sources_for_prompt = format_slide_sources_for_prompt(search_results)
+
+        prompt = build_refine_slide_prompt(
+            question=question,
+            instruction=request.instruction,
+            deck=request.deck,
+            sources=sources_for_prompt,
+            max_slides=max_slides,
+        )
+
+        deck_raw, err = await ollama_client.generate_json(
+            prompt=prompt,
+            temperature=0.2,
+            system=SLIDE_SYSTEM_PROMPT,
+        )
+        if err or deck_raw is None:
+            raise RuntimeError(err or "Failed to refine slide deck JSON")
+
+        deck = normalize_slide_deck(deck_raw)
+
+        return {
+            "question": question,
+            "deck": deck,
+            "sources": sources_for_prompt,
+            "mode": mode,
+            "generation_time_seconds": round(time.time() - started, 2),
+        }
+    except Exception as e:
+        logger.error(f"[SLIDES] Refine failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

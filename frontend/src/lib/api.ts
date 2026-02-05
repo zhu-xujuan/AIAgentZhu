@@ -1,5 +1,5 @@
-// Use direct backend URL for development
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+// If NEXT_PUBLIC_API_URL is unset, use same-origin + Next.js rewrites as a proxy.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 console.log('[API] API_BASE:', API_BASE);
 
 export interface HealthStatus {
