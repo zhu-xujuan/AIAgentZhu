@@ -110,12 +110,15 @@ export async function ingestFile(file: File): Promise<IngestResult> {
 
     return result;
   } catch (err) {
+    const message = err instanceof TypeError
+      ? `バックエンドに接続できません (${API_BASE})`
+      : err instanceof Error ? err.message : String(err);
     console.error('[Upload] Request failed:', {
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
       fileName: file.name,
       uploadUrl: uploadUrl,
     });
-    throw err;
+    throw new Error(message);
   }
 }
 
@@ -159,7 +162,14 @@ export async function listDocuments(limit = 100, offset = 0): Promise<DocumentLi
   const url = `${API_BASE}/documents?limit=${limit}&offset=${offset}`;
   console.log('[API] listDocuments request:', url);
 
-  const res = await fetch(url);
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (err) {
+    // Network error (backend not running)
+    console.warn('[API] listDocuments: Backend is not reachable at', API_BASE);
+    return { documents: [], total: 0, database_available: false };
+  }
   console.log('[API] listDocuments response status:', res.status, res.statusText);
 
   if (!res.ok) {
