@@ -49,37 +49,44 @@ AIAgentは、文書を取り込み、内容を理解し、自然言語で質問�
 
 ```
 AIAgent/
-├── src/                          # メインソースコード
-│   ├── main.py                   # APIエントリーポイント (FastAPI)
-│   ├── agents/                   # 各種エージェント
-│   │   ├── document_classifier.py  # 文書分類
-│   │   ├── chunking_agent.py       # チャンク分割
-│   │   ├── fact_extractor.py       # ファクト抽出
-│   │   ├── quality_guardian.py     # 品質チェック
-│   │   ├── sql_query_agent.py      # SQLクエリ生成
-│   │   ├── answer_formatter.py     # 回答フォーマット
-│   │   └── qa_agent.py             # 質問応答
-│   ├── llm/                      # LLM関連
-│   │   ├── ai_client.py            # AIクライアント (マルチプロバイダー対応)
-│   │   ├── config.py               # 設定管理
-│   │   └── prompts/                # プロンプトテンプレート
-│   └── storage/                  # ストレージ関連
-│       ├── database.py             # PostgreSQL操作
-│       └── local_storage.py        # ファイルストレージ
+├── backend/                      # バックエンドソースコード
+│   ├── src/                      # メインソースコード
+│   │   ├── main.py               # APIエントリーポイント (FastAPI)
+│   │   ├── agents/               # 各種エージェント
+│   │   │   ├── document_classifier.py  # 文書分類
+│   │   │   ├── chunking_agent.py       # チャンク分割
+│   │   │   ├── fact_extractor.py       # ファクト抽出
+│   │   │   ├── quality_guardian.py     # 品質チェック
+│   │   │   ├── sql_query_agent.py      # SQLクエリ生成
+│   │   │   ├── answer_formatter.py     # 回答フォーマット
+│   │   │   ├── qa_agent.py             # 質問応答
+│   │   │   └── intent_router.py        # 質問意図ルーティング
+│   │   ├── llm/                  # LLM関連
+│   │   │   ├── ai_client.py      # AIクライアント (マルチプロバイダー対応)
+│   │   │   ├── config.py         # 設定管理
+│   │   │   └── prompts/          # プロンプトテンプレート
+│   │   └── storage/              # ストレージ関連
+│   │       ├── database.py       # PostgreSQL操作
+│   │       ├── local_storage.py  # ファイルストレージ
+│   │       └── pdf_parser.py     # PDF解析
+│   ├── tests/                    # テストコード
+│   │   └── run_test.py           # テスト実行スクリプト
+│   └── .env.example              # 環境変数テンプレート
+├── frontend/                     # フロントエンド (Next.js)
 ├── config/                       # 設定ファイル
 │   ├── database/
-│   │   └── init.sql                # DB初期化SQL
-│   └── dify/                       # Dify連携設定
+│   │   └── init.sql              # DB初期化SQL
+│   └── dify/                     # Dify連携設定
 │       ├── prompts/
 │       └── workflows/
 ├── scripts/                      # ユーティリティスクリプト
 │   └── import_to_dify.py
 ├── docs/                         # ドキュメント
-│   ├── ARCHITECTURE.md             # このファイル
-│   └── improvements/               # 改善提案ドキュメント
+│   ├── ARCHITECTURE.md           # このファイル
+│   ├── improvements/             # 改善提案ドキュメント
+│   └── implement/                # 実装ドキュメント
 ├── data/                         # データディレクトリ
-│   └── uploads/                    # アップロードファイル
-├── .env.example                  # 環境変数テンプレート
+│   └── uploads/                  # アップロードファイル
 └── requirements.txt              # Python依存関係
 ```
 
@@ -204,7 +211,13 @@ AIAgent/
 
 ## API エンドポイント
 
-### ヘルスチェック
+### ヘルスチェック・デバッグ
+
+| メソッド | エンドポイント | 説明 |
+|---------|---------------|------|
+| GET | `/health` | システムヘルスチェック |
+| GET | `/debug/database` | DB接続デバッグ |
+| GET | `/debug/storage` | ストレージデバッグ |
 
 ```
 GET /health
@@ -232,7 +245,23 @@ GET /health
 }
 ```
 
-### ドキュメント取り込み
+### ファイル管理
+
+| メソッド | エンドポイント | 説明 |
+|---------|---------------|------|
+| POST | `/upload` | ファイルアップロード（DBへの取り込みなし） |
+| GET | `/files/{file_id}` | ファイルメタデータ取得 |
+| DELETE | `/files/{file_id}` | ファイル削除 |
+
+### ドキュメント管理
+
+| メソッド | エンドポイント | 説明 |
+|---------|---------------|------|
+| GET | `/documents` | ドキュメント一覧取得 |
+| GET | `/documents/{document_id}` | ドキュメント詳細取得 |
+| DELETE | `/documents/{document_id}` | ドキュメント削除 |
+
+### ドキュメント取り込みパイプライン
 
 ```
 POST /pipeline/ingest
@@ -257,7 +286,7 @@ file: <アップロードファイル>
 }
 ```
 
-### 質問応答
+### 質問応答パイプライン
 
 ```
 POST /pipeline/query
@@ -285,6 +314,17 @@ Content-Type: application/json
 }
 ```
 
+### Dify連携用エージェントAPI
+
+| メソッド | エンドポイント | 説明 |
+|---------|---------------|------|
+| POST | `/agents/classify` | 文書分類 |
+| POST | `/agents/chunk` | チャンク分割 |
+| POST | `/agents/extract` | ファクト抽出 |
+| POST | `/agents/quality-check` | 品質チェック |
+| POST | `/agents/parse-query` | クエリ解析 |
+| POST | `/agents/format-answer` | 回答フォーマット |
+
 ---
 
 ## データベーススキーマ
@@ -305,7 +345,9 @@ CREATE TABLE documents (
     language VARCHAR(10),        -- ja, en
     confidence DECIMAL(3,2),     -- AIの判定信頼度
     storage_path TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    checksum VARCHAR(64),        -- SHA-256 (重複検出用)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -321,6 +363,52 @@ CREATE TABLE chunks (
     text TEXT NOT NULL,          -- 元のテキスト
     char_len INTEGER,
     embedding vector(768),       -- ★ AIが生成したベクトルを保存
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### facts テーブル（抽出された事実）
+
+```sql
+CREATE TABLE facts (
+    id SERIAL PRIMARY KEY,
+    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
+    fact_type VARCHAR(50) NOT NULL,  -- obligation, deadline, amount, etc.
+    title TEXT,
+    body TEXT NOT NULL,
+    owner VARCHAR(200),
+    due_date DATE,
+    status VARCHAR(50),
+    confidence DECIMAL(3,2),
+    needs_review BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### evidence テーブル（引用情報）
+
+```sql
+CREATE TABLE evidence (
+    id SERIAL PRIMARY KEY,
+    fact_id INTEGER REFERENCES facts(id) ON DELETE CASCADE,
+    quote TEXT NOT NULL,         -- 引用テキスト
+    page INTEGER,
+    chunk_index INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### quality_checks テーブル（品質チェック結果）
+
+```sql
+CREATE TABLE quality_checks (
+    id SERIAL PRIMARY KEY,
+    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    check_type VARCHAR(50) NOT NULL,
+    passed BOOLEAN NOT NULL,
+    score DECIMAL(3,2),
+    details JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -390,7 +478,7 @@ PostgreSQLとの通信を担当。**AI処理は行いません**。
 - ベクトル類似**検索**（pgvector）
 - 全文**検索**（フォールバック）
 
-### 5. QA Agent (`src/agents/qa_agent.py`)
+### 5. QA Agent (`backend/src/agents/qa_agent.py`)
 
 質問応答の中核コンポーネント。
 
@@ -399,6 +487,39 @@ PostgreSQLとの通信を担当。**AI処理は行いません**。
 2. 類似チャンクを検索
 3. コンテキストを構築
 4. LLMで回答生成
+
+### 6. Intent Router (`backend/src/agents/intent_router.py`)
+
+質問の意図を分類し、適切な処理にルーティングするエージェント。
+
+**対応意図カテゴリ:**
+- `LIST_FILES` - ファイル一覧表示（例: "アップロードされたファイルは？"）
+- `FILE_STATS` - 統計情報表示（例: "何件のドキュメントがある？"）
+- `FILE_DETAIL` - 特定ファイル詳細（例: "契約書.pdfの内容は？"）
+- `SEARCH_CONTENT` - コンテンツ検索（RAG）（例: "委託料について教えて"）
+- `GENERAL_QA` - 一般的な質問（RAG）（例: "この契約の要点は？"）
+
+**判定ロジック:**
+1. ルールベースマッチング（キーワードパターン）
+2. LLMフォールバック（ルールで判定できない場合）
+
+### 7. PDF Parser (`backend/src/storage/pdf_parser.py`)
+
+PDFファイルからテキストを抽出するモジュール。
+
+**機能:**
+- PyPDF2/pdfplumberでテキスト抽出
+- ページ単位での処理
+
+### 8. Local Storage (`backend/src/storage/local_storage.py`)
+
+ファイルのアップロード・管理を担当するモジュール。
+
+**機能:**
+- ファイルアップロード・保存
+- メタデータ管理（JSON形式）
+- SHA-256チェックサムによる重複検出
+- ファイル削除
 
 ---
 
