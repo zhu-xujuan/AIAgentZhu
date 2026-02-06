@@ -80,6 +80,7 @@ SLIDE_DECK_JSON_SCHEMA = {
                 "rows": [["string"]],
             },
             "image_url": "string (optional, only if provided in sources)",
+            "image_prompt": "string (optional, abstract visual prompt)",
             "chart": {
                 "type": "bar | line | pie",
                 "title": "string (optional)",
@@ -130,7 +131,7 @@ def build_generate_slide_prompt(
 - 比較や一覧に向く場合は table（headers/rows）を入れる（不要なら空/省略）
 - image_url は参考文書に明記されている場合のみ入れる（推測でURLを作らない）
 - グラフが効果的なら chart を入れる（type/labels/datasets）。数値は参考文書にある場合のみ使う
-- 文書に明記がない場合は、例示（「例」「イメージ」）として抽象的な図・表・フローを作ってもよいが、事実と誤解される具体的数値や固有名は使わない
+- 文書に明記がない場合は、例示（「例」「イメージ」）として抽象的な図・表・フローや image_prompt を作ってもよいが、事実と誤解される具体的数値や固有名は使わない
 - citations は可能な限り付ける（source_id, source_title, quote）
 - quote は参考文書 text からの短い抜粋（120文字以内）
 
@@ -168,6 +169,7 @@ def build_refine_slide_prompt(
 - diagram_mermaid は必要に応じて更新してよい（文書根拠に基づく）
 - table は必要に応じて更新してよい（文書根拠に基づく）
 - image_url は参考文書に明記されている場合のみ維持/追加（推測でURLを作らない）
+- image_prompt は必要に応じて更新してよい（抽象的な表現、固有名や具体数値は避ける）
 - chart は必要に応じて更新してよい（文書根拠に基づく）。文書に明記がない場合は例示として抽象的な図・表・フローを作ってもよい
 - citations は可能な限り維持/追加（source_id, source_title, quote）
 
@@ -223,6 +225,10 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
         image_url = s.get("image_url") or s.get("image")
         if image_url is not None:
             image_url = str(image_url).strip()
+
+        image_prompt = s.get("image_prompt") or s.get("visual_prompt") or s.get("image_description")
+        if image_prompt is not None:
+            image_prompt = str(image_prompt).strip()
 
         chart_raw = s.get("chart") or s.get("chart_data") or s.get("chart_json")
         if isinstance(chart_raw, str):
@@ -328,6 +334,7 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
                 "diagram_mermaid": diagram_mermaid or "",
                 "table": table_out,
                 "image_url": image_url or "",
+                "image_prompt": image_prompt or "",
                 "chart": chart_out,
                 "speaker_notes": speaker_notes or "",
                 "citations": citations_out[:6],

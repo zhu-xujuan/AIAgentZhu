@@ -10,6 +10,7 @@ import {
   FileDown,
   Pencil,
   Plus,
+  RefreshCw,
   Sparkles,
   Trash2,
   Upload,
@@ -30,6 +31,7 @@ export type Slide = {
   table?: SlideTable | null;
   image_url?: string;
   image_data_url?: string;
+  image_prompt?: string;
   chart?: SlideChart | null;
   speaker_notes?: string;
   citations?: SlideCitation[];
@@ -141,6 +143,13 @@ function chartToQuickchartUrl(chart?: SlideChart | null) {
     },
   };
   return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}`;
+}
+
+function buildDefaultImagePrompt(slide?: Slide | null) {
+  if (!slide) return '';
+  const bullets = (slide.bullets || []).slice(0, 6).join('; ');
+  const base = `${slide.title || 'Slide'}. ${bullets}`.trim();
+  return `${base}. Abstract flat vector illustration, clean, minimal, soft colors, no text, no numbers, no logos.`;
 }
 
 function deckToMarkdown(deck: SlideDeck) {
@@ -299,6 +308,8 @@ export function SlideStudio({
   const exportPngCacheRef = useRef<{ fingerprint: string; pngs: string[] } | null>(null);
   const selectedSlide = useMemo(() => deck.slides[selectedIndex], [deck.slides, selectedIndex]);
   const [chartDraft, setChartDraft] = useState('');
+  const [imagePromptDraft, setImagePromptDraft] = useState('');
+  const [imageGenerating, setImageGenerating] = useState(false);
   const chartUrl = useMemo(
     () => chartToQuickchartUrl(selectedSlide?.chart || null),
     [selectedSlide?.chart]
@@ -307,7 +318,8 @@ export function SlideStudio({
   useEffect(() => {
     if (!open) return;
     setChartDraft(chartToJson(selectedSlide?.chart || null));
-  }, [open, selectedSlide?.id, selectedSlide?.chart]);
+    setImagePromptDraft(selectedSlide?.image_prompt || '');
+  }, [open, selectedSlide?.id, selectedSlide?.chart, selectedSlide?.image_prompt]);
 
   useEffect(() => {
     if (!open) return;
@@ -348,6 +360,37 @@ export function SlideStudio({
       });
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleGenerateImage = async () => {
+    if (!selectedSlide || imageGenerating) return;
+    const prompt = (imagePromptDraft || selectedSlide.image_prompt || buildDefaultImagePrompt(selectedSlide)).trim();
+    if (!prompt) return;
+    setImageGenerating(true);
+    try {
+      const response = await fetch('/api/slides/image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `HTTP error: ${response.status}`);
+      }
+      const data = await response.json();
+      const dataUrl = data?.data_url || '';
+      if (!dataUrl) throw new Error('Image generation failed');
+      updateSlide(selectedIndex, {
+        image_data_url: dataUrl,
+        image_url: '',
+        image_prompt: prompt,
+      });
+      setImagePromptDraft(prompt);
+    } catch (err) {
+      console.error('[SlideStudio] Image generation failed', err);
+    } finally {
+      setImageGenerating(false);
+    }
   };
 
   const addSlide = () => {
@@ -857,6 +900,25 @@ export function SlideStudio({
                         >
                           <X className="w-3.5 h-3.5" />
                           Clear
+                        </button>
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          value={imagePromptDraft}
+                          onChange={(e) => setImagePromptDraft(e.target.value)}
+                          onBlur={() => updateSlide(selectedIndex, { image_prompt: imagePromptDraft })}
+                          className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/40"
+                          placeholder="Image prompt (abstract)"
+                          disabled={busy || exporting !== null || imageGenerating}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleGenerateImage}
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-2 text-xs hover:bg-accent transition-colors"
+                          disabled={busy || exporting !== null || imageGenerating}
+                        >
+                          {imageGenerating ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                          Generate
                         </button>
                       </div>
                     </div>

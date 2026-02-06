@@ -61,9 +61,47 @@ export interface QueryResult {
   search_time_seconds: number | null;
 }
 
+export interface LlmConfig {
+  enabled: boolean;
+  provider: string;
+  base_url: string;
+  model: string | null;
+  embedding_model: string | null;
+}
+
+export interface LlmConfigUpdateResult {
+  base_url: string;
+  applied: boolean;
+  persisted: boolean;
+  message: string;
+  error?: string | null;
+}
+
 export async function checkHealth(): Promise<HealthStatus> {
   const res = await fetch(`${API_BASE}/health`);
   if (!res.ok) throw new Error('Health check failed');
+  return res.json();
+}
+
+export async function getLlmConfig(): Promise<LlmConfig> {
+  const res = await fetch(`${API_BASE}/config/llm`);
+  if (!res.ok) throw new Error('Failed to fetch LLM config');
+  return res.json();
+}
+
+export async function updateLlmConfig(
+  baseUrl: string,
+  persist = true
+): Promise<LlmConfigUpdateResult> {
+  const res = await fetch(`${API_BASE}/config/llm`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ base_url: baseUrl, persist }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Update failed' }));
+    throw new Error(error.detail || 'Update failed');
+  }
   return res.json();
 }
 

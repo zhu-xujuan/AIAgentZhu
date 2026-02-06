@@ -7,6 +7,7 @@ Supports LLM-enhanced processing via Ollama with rule-based fallback.
 import os
 import sys
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, List
@@ -14,12 +15,24 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import httpx
 
 # Configuration from environment
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))  # Default 50MB
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 EMBEDDING_WARMUP_ENABLED = os.getenv("EMBEDDING_WARMUP_ENABLED", "true").lower() == "true"
+
+# Image generation (optional)
+IMAGE_GEN_ENABLED = os.getenv("IMAGE_GEN_ENABLED", "false").lower() == "true"
+IMAGE_GEN_PROVIDER = os.getenv("IMAGE_GEN_PROVIDER", "openai")
+IMAGE_GEN_API_KEY = os.getenv("IMAGE_GEN_API_KEY") or os.getenv("AI_API_KEY", "")
+IMAGE_GEN_BASE_URL = os.getenv("IMAGE_GEN_BASE_URL", "https://api.openai.com/v1")
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "gpt-image-1")
+IMAGE_GEN_SIZE = os.getenv("IMAGE_GEN_SIZE", "1024x1024")
+IMAGE_GEN_QUALITY = os.getenv("IMAGE_GEN_QUALITY", "medium")
+IMAGE_GEN_MAX_PER_DECK = int(os.getenv("IMAGE_GEN_MAX_PER_DECK", "6"))
+IMAGE_GEN_TIMEOUT = int(os.getenv("IMAGE_GEN_TIMEOUT", "60"))
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -60,6 +73,30 @@ db_service: Optional[DatabaseService] = None
 
 # Alias for backwards compatibility
 ollama_client: Optional[AIClient] = None
+
+
+def _get_env_local_path() -> Path:
+    backend_root = Path(__file__).resolve().parents[1]
+    return backend_root / ".env.local"
+
+
+def _upsert_env_value(env_path: Path, key: str, value: str) -> None:
+    lines: List[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    updated = False
+    for idx, line in enumerate(lines):
+        if key_pattern.match(line):
+            lines[idx] = f"{key}={value}"
+            updated = True
+            break
+
+    if not updated:
+        lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 @asynccontextmanager
@@ -182,6 +219,11 @@ class ChunkRequest(BaseModel):
     pages: List[dict]
 
 
+class LLMConfigUpdate(BaseModel):
+    base_url: str
+    persist: bool = True
+
+
 class ExtractRequest(BaseModel):
     doc_type: str
     chunks: List[dict]
@@ -213,6 +255,10 @@ class SlideDeckRefineRequest(BaseModel):
     mode: Optional[str] = "standard"
     max_slides: Optional[int] = 8
     top_k: Optional[int] = None
+
+
+class SlideImageRequest(BaseModel):
+    prompt: str
 
 
 class FormatRequest(BaseModel):
@@ -480,6 +526,80 @@ async def debug_storage():
     except Exception as e:
         logger.error(f"Debug storage error: {e}", exc_info=True)
         return {"error": str(e)}
+
+
+@app.get("/config/llm")
+async def get_llm_settings():
+    """Get current LLM configuration."""
+    config = llm_config or get_llm_config()
+    return {
+        "enabled": config.enabled,
+        "provider": config.provider.value,
+        "base_url": config.base_url,
+        "model": config.model,
+        "embedding_model": config.embedding_model,
+    }
+
+
+@app.put("/config/llm")
+async def update_llm_settings(payload: LLMConfigUpdate):
+    """Update LLM base URL and attempt hot reload."""
+    global ai_client, ollama_client, llm_config
+
+    base_url = payload.base_url.strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+
+    applied = False
+    error: Optional[str] = None
+    config = llm_config or get_llm_config()
+
+    if config.enabled:
+        new_client = AIClient(
+            base_url=base_url,
+            model=config.model,
+            embedding_model=config.embedding_model,
+            timeout=config.timeout,
+            max_retries=config.max_retries,
+            provider=config.provider,
+            api_key=config.api_key,
+            max_concurrent_embeddings=config.max_concurrent_embeddings,
+        )
+        try:
+            health = await new_client.health_check()
+            if health.available:
+                if ai_client:
+                    await ai_client.close()
+                ai_client = new_client
+                ollama_client = new_client
+                config.base_url = base_url
+                os.environ["AI_BASE_URL"] = base_url
+                applied = True
+            else:
+                error = health.error or "LLM service not available"
+                await new_client.close()
+        except Exception as e:
+            error = str(e)
+            await new_client.close()
+    else:
+        error = "LLM is disabled"
+
+    if payload.persist:
+        try:
+            _upsert_env_value(_get_env_local_path(), "AI_BASE_URL", base_url)
+        except Exception as e:
+            logger.warning(f"Failed to persist AI_BASE_URL: {e}")
+
+    if llm_config:
+        llm_config.base_url = base_url
+
+    return {
+        "base_url": base_url,
+        "applied": applied,
+        "persisted": payload.persist,
+        "message": "Applied to current process" if applied else "Saved for next startup",
+        "error": error,
+    }
 
 
 @app.get("/health")
@@ -1533,6 +1653,89 @@ async def chat_stream(request: QueryRequest):
     )
 
 
+def _compact_prompt(text: str, max_chars: int = 400) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    return text[:max_chars]
+
+
+def _build_image_prompt(slide: dict) -> str:
+    custom = (slide.get("image_prompt") or "").strip()
+    if custom:
+        return _compact_prompt(custom)
+    title = str(slide.get("title") or "").strip()
+    bullets = slide.get("bullets") or []
+    bullet_text = "; ".join([str(b).strip() for b in bullets if str(b).strip()][:6])
+    base = f"{title}. {bullet_text}".strip(". ")
+    style = "Abstract flat vector illustration, clean, minimal, soft colors, no text, no numbers, no logos."
+    return _compact_prompt(f"{base}. {style}")
+
+
+async def generate_image_data_url(prompt: str) -> Optional[str]:
+    if not IMAGE_GEN_ENABLED:
+        return None
+    if IMAGE_GEN_PROVIDER != "openai":
+        return None
+    if not IMAGE_GEN_API_KEY:
+        return None
+    if not prompt.strip():
+        return None
+
+    payload = {
+        "model": IMAGE_GEN_MODEL,
+        "prompt": prompt,
+        "size": IMAGE_GEN_SIZE,
+        "response_format": "b64_json",
+    }
+    if IMAGE_GEN_QUALITY:
+        payload["quality"] = IMAGE_GEN_QUALITY
+
+    headers = {
+        "Authorization": f"Bearer {IMAGE_GEN_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    url = IMAGE_GEN_BASE_URL.rstrip("/") + "/images/generations"
+
+    try:
+        async with httpx.AsyncClient(timeout=IMAGE_GEN_TIMEOUT) as client:
+            res = await client.post(url, headers=headers, json=payload)
+            if res.status_code >= 400:
+                logger.warning(f"[IMAGE] Generation failed: {res.status_code} {res.text}")
+                return None
+            data = res.json()
+            b64 = data.get("data", [{}])[0].get("b64_json")
+            if not b64:
+                return None
+            return f"data:image/png;base64,{b64}"
+    except Exception as e:
+        logger.warning(f"[IMAGE] Generation error: {e}")
+        return None
+
+
+async def maybe_attach_generated_images(deck: dict) -> dict:
+    if not IMAGE_GEN_ENABLED:
+        return deck
+    slides = deck.get("slides") or []
+    if not isinstance(slides, list) or len(slides) == 0:
+        return deck
+
+    max_images = max(0, min(len(slides), IMAGE_GEN_MAX_PER_DECK))
+    generated = 0
+    for s in slides:
+        if generated >= max_images:
+            break
+        if not isinstance(s, dict):
+            continue
+        if (s.get("image_url") or "").strip() or (s.get("image_data_url") or "").strip():
+            continue
+        prompt = _build_image_prompt(s)
+        data_url = await generate_image_data_url(prompt)
+        if data_url:
+            s["image_data_url"] = data_url
+            s["image_prompt"] = prompt
+            generated += 1
+    return deck
+
+
 @app.post("/pipeline/slides/generate")
 async def generate_slides(request: SlideDeckGenerateRequest):
     """
@@ -1578,6 +1781,7 @@ async def generate_slides(request: SlideDeckGenerateRequest):
             raise RuntimeError(err or "Failed to generate slide deck JSON")
 
         deck = normalize_slide_deck(deck_raw)
+        deck = await maybe_attach_generated_images(deck)
 
         return {
             "question": question,
@@ -1636,6 +1840,7 @@ async def refine_slides(request: SlideDeckRefineRequest):
             raise RuntimeError(err or "Failed to refine slide deck JSON")
 
         deck = normalize_slide_deck(deck_raw)
+        deck = await maybe_attach_generated_images(deck)
 
         return {
             "question": question,
@@ -1647,6 +1852,19 @@ async def refine_slides(request: SlideDeckRefineRequest):
     except Exception as e:
         logger.error(f"[SLIDES] Refine failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/image")
+async def generate_slide_image(request: SlideImageRequest):
+    if not IMAGE_GEN_ENABLED:
+        raise HTTPException(status_code=503, detail="Image generation is disabled")
+    prompt = request.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    data_url = await generate_image_data_url(prompt)
+    if not data_url:
+        raise HTTPException(status_code=500, detail="Image generation failed")
+    return {"data_url": data_url}
 
 
 if __name__ == "__main__":
