@@ -31,8 +31,13 @@ function isPngDataUrl(value: string) {
   return typeof value === 'string' && value.startsWith('data:image/png');
 }
 
+function sanitizeXmlText(value: string) {
+  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+}
+
 function safeText(value: unknown) {
-  return typeof value === 'string' ? value : '';
+  if (typeof value !== 'string') return '';
+  return sanitizeXmlText(value);
 }
 
 function safeStringArray(value: unknown) {
@@ -206,17 +211,28 @@ export async function POST(req: Request) {
       // Bullets (left)
       const bullets = safeStringArray(s.bullets);
       const bulletText = bullets.join('\n');
-      slide.addText(bulletText || ' ', {
-        x: 0.9,
-        y: 1.55,
-        w: 7.4,
-        h: 5.1,
-        fontSize: 20,
-        color: '111827',
-        bullet: { indent: 20 },
-        hanging: 6,
-        lineSpacingMultiple: 1.1,
-      } as any);
+      if (bulletText.trim()) {
+        slide.addText(bulletText, {
+          x: 0.9,
+          y: 1.55,
+          w: 7.4,
+          h: 5.1,
+          fontSize: 20,
+          color: '111827',
+          bullet: { indent: 20 },
+          hanging: 6,
+          lineSpacingMultiple: 1.1,
+        } as any);
+      } else {
+        slide.addText(' ', {
+          x: 0.9,
+          y: 1.55,
+          w: 7.4,
+          h: 5.1,
+          fontSize: 20,
+          color: '111827',
+        } as any);
+      }
 
       // Diagram (right) as PNG if present
       const diagram = diagramPngs[idx];
@@ -311,7 +327,7 @@ export async function POST(req: Request) {
           border: { color: 'E5E7EB', pt: 1 },
           valign: 'mid',
           align: 'left',
-          fill: 'FFFFFF',
+          fill: { color: 'FFFFFF' },
         } as any);
       }
 
