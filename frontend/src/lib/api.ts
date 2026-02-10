@@ -71,6 +71,7 @@ export interface LlmConfig {
 
 export interface LlmConfigUpdateResult {
   base_url: string;
+  provider?: string;
   applied: boolean;
   persisted: boolean;
   message: string;
@@ -91,12 +92,17 @@ export async function getLlmConfig(): Promise<LlmConfig> {
 
 export async function updateLlmConfig(
   baseUrl: string,
-  persist = true
+  persist = true,
+  provider?: string
 ): Promise<LlmConfigUpdateResult> {
   const res = await fetch(`${API_BASE}/config/llm`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ base_url: baseUrl, persist }),
+    body: JSON.stringify({
+      base_url: baseUrl,
+      persist,
+      ...(provider ? { provider } : {}),
+    }),
   });
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: 'Update failed' }));

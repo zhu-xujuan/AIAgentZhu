@@ -38,11 +38,17 @@ IMAGE_GEN_TIMEOUT = int(os.getenv("IMAGE_GEN_TIMEOUT", "60"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
+ENV_LOCAL_PATH = Path(__file__).resolve().parents[1] / ".env.local"
 load_dotenv()
+load_dotenv(ENV_LOCAL_PATH, override=True)
 
 from src.storage.local_storage import LocalStorage
 from src.storage.database import DatabaseService, get_database_service
-from src.storage.pdf_parser import extract_text_from_pdf, is_valid_pdf
+from src.storage.pdf_parser import (
+    extract_text_from_pdf,
+    extract_text_from_pdf_with_ocr,
+    is_valid_pdf,
+)
 from src.agents.document_classifier import classify_document, classify_document_async
 from src.agents.chunking_agent import chunk_document
 from src.agents.fact_extractor import extract_facts, extract_facts_async
@@ -60,7 +66,7 @@ from src.agents.slide_agent import (
     retrieve_sources_for_slides,
 )
 from src.llm.ai_client import AIClient
-from src.llm.config import get_llm_config, LLMConfig
+from src.llm.config import get_llm_config, LLMConfig, AIProvider
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -70,6 +76,7 @@ logger = logging.getLogger(__name__)
 ai_client: Optional[AIClient] = None
 llm_config: Optional[LLMConfig] = None
 db_service: Optional[DatabaseService] = None
+ocr_client: Optional[AIClient] = None  # Dedicated client for OCR when AI_OCR_BASE_URL is set
 
 # Alias for backwards compatibility
 ollama_client: Optional[AIClient] = None
@@ -102,7 +109,7 @@ def _upsert_env_value(env_path: Path, key: str, value: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
-    global ai_client, ollama_client, llm_config, db_service
+    global ai_client, ollama_client, llm_config, db_service, ocr_client
 
     import time
 
@@ -123,6 +130,28 @@ async def lifespan(app: FastAPI):
         )
         ollama_client = ai_client  # Backwards compatibility
         logger.info(f"AIClient initialized: {ai_client}")
+
+        # OCR client: use main client when provider is Ollama and ocr_model set;
+        # otherwise use dedicated Ollama client when AI_OCR_BASE_URL + AI_OCR_MODEL are set
+        ocr_model = getattr(llm_config, "ocr_model", None)
+        ocr_base_url = getattr(llm_config, "ocr_base_url", None)
+        if ocr_model and llm_config.provider == AIProvider.OLLAMA:
+            ocr_client = ai_client
+            logger.info(f"OCR enabled (main client): model={ocr_model}")
+        elif ocr_model and ocr_base_url:
+            ocr_client = AIClient(
+                base_url=ocr_base_url,
+                model=ocr_model,
+                embedding_model=llm_config.embedding_model,
+                timeout=max(llm_config.timeout, 120.0),
+                max_retries=llm_config.max_retries,
+                provider=AIProvider.OLLAMA,
+                api_key=None,
+                max_concurrent_embeddings=1,
+            )
+            logger.info(f"OCR enabled (dedicated client): base_url={ocr_base_url}, model={ocr_model}")
+        else:
+            ocr_client = None
 
         # Check health on startup
         health = await ai_client.health_check()
@@ -178,6 +207,9 @@ async def lifespan(app: FastAPI):
     if ai_client:
         await ai_client.close()
         logger.info("AIClient closed")
+    if ocr_client and ocr_client is not ai_client:
+        await ocr_client.close()
+        logger.info("OCR client closed")
 
     if db_service:
         db_service.close()
@@ -222,6 +254,7 @@ class ChunkRequest(BaseModel):
 class LLMConfigUpdate(BaseModel):
     base_url: str
     persist: bool = True
+    provider: Optional[str] = None
 
 
 class ExtractRequest(BaseModel):
@@ -553,6 +586,12 @@ async def update_llm_settings(payload: LLMConfigUpdate):
     applied = False
     error: Optional[str] = None
     config = llm_config or get_llm_config()
+    next_provider = config.provider
+    if payload.provider:
+        try:
+            next_provider = AIProvider(payload.provider.strip().lower())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid provider value")
 
     if config.enabled:
         new_client = AIClient(
@@ -561,7 +600,7 @@ async def update_llm_settings(payload: LLMConfigUpdate):
             embedding_model=config.embedding_model,
             timeout=config.timeout,
             max_retries=config.max_retries,
-            provider=config.provider,
+            provider=next_provider,
             api_key=config.api_key,
             max_concurrent_embeddings=config.max_concurrent_embeddings,
         )
@@ -573,7 +612,9 @@ async def update_llm_settings(payload: LLMConfigUpdate):
                 ai_client = new_client
                 ollama_client = new_client
                 config.base_url = base_url
+                config.provider = next_provider
                 os.environ["AI_BASE_URL"] = base_url
+                os.environ["AI_PROVIDER"] = next_provider.value
                 applied = True
             else:
                 error = health.error or "LLM service not available"
@@ -587,14 +628,19 @@ async def update_llm_settings(payload: LLMConfigUpdate):
     if payload.persist:
         try:
             _upsert_env_value(_get_env_local_path(), "AI_BASE_URL", base_url)
+            if payload.provider:
+                _upsert_env_value(_get_env_local_path(), "AI_PROVIDER", next_provider.value)
         except Exception as e:
             logger.warning(f"Failed to persist AI_BASE_URL: {e}")
 
     if llm_config:
         llm_config.base_url = base_url
+        if payload.provider:
+            llm_config.provider = next_provider
 
     return {
         "base_url": base_url,
+        "provider": next_provider.value,
         "applied": applied,
         "persisted": payload.persist,
         "message": "Applied to current process" if applied else "Saved for next startup",
@@ -1156,11 +1202,19 @@ async def ingest_document(file: UploadFile = File(...)):
     # Read text - handle PDF and text files
     raw_text = ""
     pages = []
+    parse_meta_ocr_used = False
 
     if file_ext == ".pdf":
-        # Extract text from PDF
+        # Extract text from PDF (with optional OCR for pages that have no text)
         try:
-            pages = extract_text_from_pdf(content)
+            if ocr_client and llm_config and getattr(llm_config, "ocr_model", None):
+                pages, parse_meta_ocr_used = await extract_text_from_pdf_with_ocr(
+                    content, ocr_client, llm_config.ocr_model
+                )
+                if parse_meta_ocr_used:
+                    logger.info("[INGEST] OCR was used for some PDF pages")
+            else:
+                pages = extract_text_from_pdf(content)
             # Combine all page texts for classification
             raw_text = "\n\n".join([p["text"] for p in pages])
             logger.info(f"Extracted {len(pages)} pages from PDF")
@@ -1307,7 +1361,7 @@ async def ingest_document(file: UploadFile = File(...)):
         quality = await asyncio.wait_for(
             check_quality_async(
                 facts["facts"],
-                {"ocr_used": False, "chunk_count": len(chunks["chunks"])},
+                {"ocr_used": parse_meta_ocr_used, "chunk_count": len(chunks["chunks"])},
                 ollama_client=ollama_client if use_llm_quality else None,
                 use_llm=use_llm_quality,
                 doc_type=classification["doc_type"],

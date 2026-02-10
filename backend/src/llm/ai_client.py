@@ -7,6 +7,7 @@ Provides async HTTP client with health checks, text generation, and retry logic.
 import asyncio
 import json
 import logging
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
@@ -90,7 +91,7 @@ class AIClient:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "qwen3:30b",
+        model: str = "Qwen/Qwen2.5-1.5B-Instruct",
         embedding_model: str = "nomic-embed-text",
         timeout: float = 60.0,
         max_retries: int = 2,
@@ -107,6 +108,18 @@ class AIClient:
         self.api_key = api_key
         self.max_concurrent_embeddings = max_concurrent_embeddings
         self._client: Optional[httpx.AsyncClient] = None
+        self._openai_path_prefix = self._compute_openai_path_prefix()
+
+    def _compute_openai_path_prefix(self) -> str:
+        if self.provider != AIProvider.OPENAI:
+            return ""
+        path = urlsplit(self.base_url).path or ""
+        normalized = path.rstrip("/")
+        if normalized in ("", "/"):
+            return "/v1"
+        if normalized.endswith("/v1"):
+            return ""
+        return ""
 
     def _get_headers(self) -> dict[str, str]:
         """Get headers for API requests."""
@@ -154,7 +167,7 @@ class AIClient:
                 models = [m.get("name", "") for m in data.get("models", [])]
 
             elif self.provider in (AIProvider.OPENAI, AIProvider.AZURE):
-                response = await client.get("/models")
+                response = await client.get(f"{self._openai_path_prefix}/models")
                 response.raise_for_status()
                 data = response.json()
                 models = [m.get("id", "") for m in data.get("data", [])]
@@ -353,7 +366,7 @@ class AIClient:
         if format_json:
             payload["response_format"] = {"type": "json_object"}
 
-        response = await client.post("/chat/completions", json=payload)
+        response = await client.post(f"{self._openai_path_prefix}/chat/completions", json=payload)
         response.raise_for_status()
         data = response.json()
 
@@ -633,7 +646,7 @@ class AIClient:
     ) -> EmbeddingResult:
         """Generate embedding using OpenAI-compatible API."""
         payload = {"model": model, "input": text}
-        response = await client.post("/embeddings", json=payload)
+        response = await client.post(f"{self._openai_path_prefix}/embeddings", json=payload)
         response.raise_for_status()
         data = response.json()
 
@@ -699,6 +712,74 @@ class AIClient:
                 )
 
         return results
+
+    async def ocr_image(
+        self,
+        image_base64: str,
+        model: str,
+        prompt: str = "この画像に含まれるテキストをすべて抽出してください。",
+    ) -> GenerateResult:
+        """
+        Run OCR on a single image using Ollama vision API (e.g. glm-ocr).
+        Only supported when provider is OLLAMA. Uses /api/chat with images array.
+
+        Args:
+            image_base64: Base64-encoded image (no data URL prefix).
+            model: Model name (e.g. "glm-ocr:bf16").
+            prompt: Instruction for the OCR model.
+
+        Returns:
+            GenerateResult with extracted text or error.
+        """
+        if self.provider != AIProvider.OLLAMA:
+            return GenerateResult(
+                text="",
+                model=model,
+                total_duration_ms=0,
+                prompt_eval_count=0,
+                eval_count=0,
+                success=False,
+                error="OCR is only supported with Ollama provider",
+            )
+        try:
+            client = await self._get_client()
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [image_base64],
+                    }
+                ],
+                "stream": False,
+            }
+            response = await client.post("/api/chat", json=payload)
+            response.raise_for_status()
+            data = response.json()
+            msg = data.get("message", {})
+            text = msg.get("content", "").strip()
+            total_ns = data.get("total_duration", 0)
+            return GenerateResult(
+                text=text,
+                model=data.get("model", model),
+                total_duration_ms=round(total_ns / 1_000_000, 2),
+                prompt_eval_count=data.get("prompt_eval_count", 0),
+                eval_count=data.get("eval_count", 0),
+                success=True,
+                error=None,
+            )
+        except Exception as e:
+            logger.warning(f"OCR request failed: {e}")
+            return GenerateResult(
+                text="",
+                model=model,
+                total_duration_ms=0,
+                prompt_eval_count=0,
+                eval_count=0,
+                success=False,
+                error=str(e),
+            )
 
     def __repr__(self) -> str:
         return f"AIClient(provider={self.provider.value!r}, base_url={self.base_url!r}, model={self.model!r})"

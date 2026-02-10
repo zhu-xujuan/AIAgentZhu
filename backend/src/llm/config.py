@@ -12,6 +12,7 @@ from enum import Enum
 
 class AIProvider(Enum):
     """Supported AI providers."""
+
     OLLAMA = "ollama"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
@@ -21,6 +22,7 @@ class AIProvider(Enum):
 @dataclass
 class AgentLLMConfig:
     """Per-agent LLM configuration."""
+
     enabled: bool = True
     model: Optional[str] = None  # None means use default model
     temperature: float = 0.1
@@ -54,11 +56,17 @@ class LLMConfig:
     """
 
     # Provider settings
-    provider: AIProvider = AIProvider.OLLAMA
-    base_url: str = "http://localhost:11434"
+    provider: AIProvider = AIProvider.OPENAI
+    base_url: str = "https://ollama.wgzhao-mac.work"
     api_key: Optional[str] = None
     model: str = "qwen3:30b"
     embedding_model: str = "nomic-embed-text"
+    ocr_model: Optional[str] = (
+        "glm-ocr:bf16"  # Ollama vision model for scanned PDFs; set to None or "" to disable
+    )
+    ocr_base_url: Optional[str] = (
+        None  # optional Ollama URL for OCR when main provider is not Ollama
+    )
     timeout: float = 180.0
     max_retries: int = 2
 
@@ -162,11 +170,11 @@ def _parse_int(value: str, default: int) -> int:
 def _parse_provider(value: str) -> AIProvider:
     """Parse AI provider from environment variable string."""
     if not value:
-        return AIProvider.OLLAMA
+        return AIProvider.OPENAI
     try:
         return AIProvider(value.lower())
     except ValueError:
-        return AIProvider.OLLAMA
+        return AIProvider.OPENAI
 
 
 def get_llm_config() -> LLMConfig:
@@ -181,7 +189,11 @@ def get_llm_config() -> LLMConfig:
     provider = _parse_provider(os.getenv("AI_PROVIDER", ""))
 
     # Base URL (AI_BASE_URL > OLLAMA_BASE_URL > default)
-    base_url = os.getenv("AI_BASE_URL") or os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+    base_url = (
+        os.getenv("AI_BASE_URL")
+        or os.getenv("OLLAMA_BASE_URL")
+        or "https://ollama.wgzhao-mac.work"
+    )
 
     # API Key
     api_key = os.getenv("AI_API_KEY") or None
@@ -192,32 +204,35 @@ def get_llm_config() -> LLMConfig:
     # Embedding model
     embedding_model = os.getenv("AI_EMBEDDING_MODEL") or "nomic-embed-text"
 
+    # OCR model (Ollama vision model for scanned PDFs; default glm-ocr:bf16; set empty to disable)
+    _ocr_env = (os.getenv("AI_OCR_MODEL") or "glm-ocr:bf16").strip()
+    ocr_model = _ocr_env if _ocr_env else None
+    if ocr_model is None and _parse_bool(os.getenv("AI_OCR_ENABLED", ""), False):
+        ocr_model = "glm-ocr:bf16"
+    # Optional separate Ollama base URL for OCR when main provider is not Ollama
+    ocr_base_url = (os.getenv("AI_OCR_BASE_URL") or "").strip() or None
+
     # Timeout (AI_TIMEOUT > OLLAMA_TIMEOUT > default)
     timeout = _parse_float(
-        os.getenv("AI_TIMEOUT") or os.getenv("OLLAMA_TIMEOUT", ""),
-        60.0
+        os.getenv("AI_TIMEOUT") or os.getenv("OLLAMA_TIMEOUT", ""), 60.0
     )
 
     # Max retries (AI_MAX_RETRIES > OLLAMA_MAX_RETRIES > default)
     max_retries = _parse_int(
-        os.getenv("AI_MAX_RETRIES") or os.getenv("OLLAMA_MAX_RETRIES", ""),
-        2
+        os.getenv("AI_MAX_RETRIES") or os.getenv("OLLAMA_MAX_RETRIES", ""), 2
     )
 
     # Enabled (AI_ENABLED > OLLAMA_ENABLED > default)
     enabled = _parse_bool(
-        os.getenv("AI_ENABLED") or os.getenv("OLLAMA_ENABLED", ""),
-        True
+        os.getenv("AI_ENABLED") or os.getenv("OLLAMA_ENABLED", ""), True
     )
 
     # Parallel processing settings
     max_concurrent_embeddings = _parse_int(
-        os.getenv("AI_MAX_CONCURRENT_EMBEDDINGS", ""),
-        4
+        os.getenv("AI_MAX_CONCURRENT_EMBEDDINGS", ""), 4
     )
     max_concurrent_documents = _parse_int(
-        os.getenv("AI_MAX_CONCURRENT_DOCUMENTS", ""),
-        3
+        os.getenv("AI_MAX_CONCURRENT_DOCUMENTS", ""), 3
     )
 
     return LLMConfig(
@@ -227,21 +242,22 @@ def get_llm_config() -> LLMConfig:
         api_key=api_key,
         model=model,
         embedding_model=embedding_model,
+        ocr_model=ocr_model,
+        ocr_base_url=ocr_base_url,
         timeout=timeout,
         max_retries=max_retries,
-
         # Parallel processing settings
         max_concurrent_embeddings=max_concurrent_embeddings,
         max_concurrent_documents=max_concurrent_documents,
-
         # Global enable flag
         enabled=enabled,
-
         # Agent-specific settings
         fact_extractor=AgentLLMConfig(
             enabled=_parse_bool(os.getenv("LLM_FACT_EXTRACTOR_ENABLED", ""), True),
             model=os.getenv("LLM_FACT_EXTRACTOR_MODEL") or None,
-            temperature=_parse_float(os.getenv("LLM_FACT_EXTRACTOR_TEMPERATURE", ""), 0.1),
+            temperature=_parse_float(
+                os.getenv("LLM_FACT_EXTRACTOR_TEMPERATURE", ""), 0.1
+            ),
         ),
         sql_query=AgentLLMConfig(
             enabled=_parse_bool(os.getenv("LLM_SQL_QUERY_ENABLED", ""), True),
@@ -251,17 +267,23 @@ def get_llm_config() -> LLMConfig:
         answer_formatter=AgentLLMConfig(
             enabled=_parse_bool(os.getenv("LLM_ANSWER_FORMATTER_ENABLED", ""), True),
             model=os.getenv("LLM_ANSWER_FORMATTER_MODEL") or None,
-            temperature=_parse_float(os.getenv("LLM_ANSWER_FORMATTER_TEMPERATURE", ""), 0.3),
+            temperature=_parse_float(
+                os.getenv("LLM_ANSWER_FORMATTER_TEMPERATURE", ""), 0.3
+            ),
         ),
         document_classifier=AgentLLMConfig(
             enabled=_parse_bool(os.getenv("LLM_DOCUMENT_CLASSIFIER_ENABLED", ""), True),
             model=os.getenv("LLM_DOCUMENT_CLASSIFIER_MODEL") or None,
-            temperature=_parse_float(os.getenv("LLM_DOCUMENT_CLASSIFIER_TEMPERATURE", ""), 0.1),
+            temperature=_parse_float(
+                os.getenv("LLM_DOCUMENT_CLASSIFIER_TEMPERATURE", ""), 0.1
+            ),
         ),
         quality_guardian=AgentLLMConfig(
             enabled=_parse_bool(os.getenv("LLM_QUALITY_GUARDIAN_ENABLED", ""), True),
             model=os.getenv("LLM_QUALITY_GUARDIAN_MODEL") or None,
-            temperature=_parse_float(os.getenv("LLM_QUALITY_GUARDIAN_TEMPERATURE", ""), 0.1),
+            temperature=_parse_float(
+                os.getenv("LLM_QUALITY_GUARDIAN_TEMPERATURE", ""), 0.1
+            ),
         ),
     )
 

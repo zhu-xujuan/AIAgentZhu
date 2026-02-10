@@ -5,17 +5,28 @@ import { AlertTriangle, CheckCircle2, Settings, Server, Loader2 } from 'lucide-r
 import { cn } from '@/lib/utils';
 import { getLlmConfig, updateLlmConfig, LlmConfigUpdateResult } from '@/lib/api';
 
+const defaultBaseUrl = 'https://ollama.kabu-ai.jp';
+const defaultProvider = 'openai';
+
 const presets = [
-  { label: 'ollama.kabu-ai.jp', value: 'https://ollama.kabu-ai.jp' },
+  { label: 'ollama.kabu-ai.jp', value: defaultBaseUrl },
   { label: 'ollama.wgzhao.mac.work (old)', value: 'https://ollama.wgzhao.mac.work' },
+];
+
+const providers = [
+  { label: 'Ollama', value: 'ollama' },
+  { label: 'OpenAI', value: 'openai' },
+  { label: 'Anthropic', value: 'anthropic' },
+  { label: 'Azure OpenAI', value: 'azure' },
 ];
 
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [baseUrl, setBaseUrl] = useState('');
-  const [currentBaseUrl, setCurrentBaseUrl] = useState('');
-  const [provider, setProvider] = useState('');
+  const [baseUrl, setBaseUrl] = useState(defaultBaseUrl);
+  const [currentBaseUrl, setCurrentBaseUrl] = useState(defaultBaseUrl);
+  const [provider, setProvider] = useState(defaultProvider);
+  const [currentProvider, setCurrentProvider] = useState(defaultProvider);
   const [model, setModel] = useState('');
   const [status, setStatus] = useState<LlmConfigUpdateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,9 +43,10 @@ export default function SettingsPage() {
       try {
         const config = await getLlmConfig();
         if (!mounted) return;
-        setBaseUrl(config.base_url || '');
-        setCurrentBaseUrl(config.base_url || '');
-        setProvider(config.provider || '');
+        setBaseUrl(config.base_url || defaultBaseUrl);
+        setCurrentBaseUrl(config.base_url || defaultBaseUrl);
+        setProvider(config.provider || defaultProvider);
+        setCurrentProvider(config.provider || defaultProvider);
         setModel(config.model || '');
       } catch (err) {
         if (!mounted) return;
@@ -59,9 +71,10 @@ export default function SettingsPage() {
     setError(null);
     setStatus(null);
     try {
-      const result = await updateLlmConfig(trimmed, true);
+      const result = await updateLlmConfig(trimmed, true, provider || undefined);
       setStatus(result);
       setCurrentBaseUrl(trimmed);
+      setCurrentProvider(provider);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Update failed');
     } finally {
@@ -94,7 +107,7 @@ export default function SettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <div className="text-xs font-medium text-muted-foreground mb-1">Preset</div>
                 <select
@@ -125,11 +138,26 @@ export default function SettingsPage() {
                   disabled={saving}
                 />
               </div>
+              <div>
+                <div className="text-xs font-medium text-muted-foreground mb-1">Provider</div>
+                <select
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value)}
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/40"
+                  disabled={saving}
+                >
+                  {providers.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-muted-foreground">
               <div className="rounded-lg border border-border bg-background px-3 py-2">
-                Provider: <span className="text-foreground">{provider || 'unknown'}</span>
+                Provider: <span className="text-foreground">{currentProvider || 'unknown'}</span>
               </div>
               <div className="rounded-lg border border-border bg-background px-3 py-2">
                 Model: <span className="text-foreground">{model || 'unknown'}</span>
