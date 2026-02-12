@@ -45,6 +45,16 @@ function safeStringArray(value: unknown) {
   return value.map((v) => safeText(v)).filter(Boolean);
 }
 
+function toTakeaway(title: string, bullets: string[]) {
+  const t = safeText(title).trim() || 'このスライド';
+  const b = bullets
+    .slice(0, 2)
+    .map((x) => safeText(x).replace(/[。.!?]$/g, '').trim())
+    .filter(Boolean);
+  if (b.length === 0) return `${t}のポイントを整理し、次のアクションを明確化します。`;
+  return `${t}では「${b.join(' / ')}」を中心に整理し、実行判断に繋げます。`;
+}
+
 function normalizeTable(table?: { headers?: string[]; rows?: string[][] }) {
   if (!table) return null;
   const headers = safeStringArray(table.headers);
@@ -233,6 +243,25 @@ export async function POST(req: Request) {
           color: '111827',
         } as any);
       }
+      // Key takeaway callout to enrich narrative (not verbatim bullet list).
+      slide.addShape(pptx.ShapeType.roundRect, {
+        x: 0.9,
+        y: 6.05,
+        w: 7.4,
+        h: 0.95,
+        fill: { color: 'EEF2FF' },
+        line: { color: 'C7D2FE', width: 1 },
+        radius: 0.12,
+      } as any);
+      slide.addText(`Takeaway: ${toTakeaway(safeText(s.title), bullets)}`, {
+        x: 1.05,
+        y: 6.22,
+        w: 7.1,
+        h: 0.62,
+        fontSize: 11,
+        color: '3730A3',
+        bold: false,
+      } as any);
 
       // Diagram (right) as PNG if present
       const diagram = diagramPngs[idx];

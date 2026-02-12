@@ -14,6 +14,7 @@ pkill -f "uvicorn src.main:app --host 0.0.0.0 --port 8001" >/dev/null 2>&1 || tr
 echo "Stopping frontend (next dev)..."
 pkill -f "next dev" >/dev/null 2>&1 || true
 cmd.exe /c "for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :3000 ^| findstr LISTENING') do taskkill /F /PID %a >nul 2>&1" >/dev/null 2>&1 || true
+cmd.exe /c "for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :3030 ^| findstr LISTENING') do taskkill /F /PID %a >nul 2>&1" >/dev/null 2>&1 || true
 
 echo "Stopping PostgreSQL container..."
 cd "$ROOT_DIR"

@@ -79,6 +79,20 @@ if ! cmd.exe /c "netstat -ano | findstr :3000 | findstr LISTENING" >/dev/null 2>
   popd >/dev/null
   echo "Frontend log: $LOG_DIR/frontend.log"
 fi
+echo "[4.5/4] Starting Slidev preview server on Windows (port 3030)..."
+mkdir -p "$FRONTEND_DIR/.slidev"
+if [[ ! -f "$FRONTEND_DIR/.slidev/slides.md" ]]; then
+  cat > "$FRONTEND_DIR/.slidev/slides.md" <<EOF
+---
+title: Slides
+---
+
+# Slide Preview
+
+Ready.
+EOF
+fi
+powershell.exe -NoProfile -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList '/k','cd /d $ROOT_WIN_PATH\\frontend && npx slidev .slidev/slides.md --port 3030 --open false --log silent --bind 0.0.0.0' -WindowStyle Normal" >/dev/null 2>&1 || true
 echo
 
 echo "================================"

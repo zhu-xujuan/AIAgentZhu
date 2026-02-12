@@ -88,12 +88,24 @@ def _build_default_table(bullets: list[str]) -> dict[str, Any]:
     }
 
 
+def _build_default_chart(bullets: list[str]) -> dict[str, Any]:
+    labels = [f"要素{i + 1}" for i in range(min(4, max(3, len(bullets[:4]))))]
+    # Use deterministic synthetic values to make the slide visually informative.
+    data = [round(40 + i * 15 + (len(bullets[i]) % 10 if i < len(bullets) else 0), 1) for i in range(len(labels))]
+    return {
+        "type": "bar",
+        "title": "主要要素の比較（参考）",
+        "labels": labels,
+        "datasets": [{"label": "評価値", "data": data}],
+    }
+
+
 def _build_fallback_slides(
     question: str,
     seed_points: list[str],
     max_slides: int,
 ) -> list[dict[str, Any]]:
-    target = max(2, min(max_slides, 6))
+    target = max(3, min(max_slides, 6))
     themes = [
         "概要",
         "主要ポイント",
@@ -142,8 +154,10 @@ def _build_fallback_slides(
         }
         if i in (0, 2):
             slide["diagram_mermaid"] = _build_default_mermaid(slide["title"], slide["bullets"])
-        elif i in (1, 3):
+        elif i in (1, 4):
             slide["table"] = _build_default_table(slide["bullets"])
+        else:
+            slide["chart"] = _build_default_chart(slide["bullets"])
         slides.append(slide)
     return slides
 
@@ -553,8 +567,10 @@ def enrich_slide_deck(
                     str(slide.get("title") or f"Slide {idx + 1}"),
                     slide["bullets"],
                 )
-            else:
+            elif idx % 3 == 1:
                 slide["table"] = _build_default_table(slide["bullets"])
+            else:
+                slide["chart"] = _build_default_chart(slide["bullets"])
             slide["image_prompt"] = (
                 "minimal flat icon illustration, clean corporate style, "
                 f"topic: {str(slide.get('title') or '').strip()}"
