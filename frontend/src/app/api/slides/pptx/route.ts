@@ -330,6 +330,47 @@ export async function POST(req: Request) {
           fill: { color: 'FFFFFF' },
         } as any);
       }
+      if (!hasImage && !hasChart && !hasDiagram && !table) {
+        // Fallback visual: simple workflow diagram from bullets (for explanation slides).
+        const flowItems = bullets.slice(0, 4);
+        const baseX = 8.7;
+        const boxW = 3.5;
+        const boxH = 0.85;
+        const gapY = 0.35;
+        flowItems.forEach((item, i) => {
+          const y = 1.55 + i * (boxH + gapY);
+          slide.addShape(pptx.ShapeType.roundRect, {
+            x: baseX,
+            y,
+            w: boxW,
+            h: boxH,
+            fill: { color: i % 2 === 0 ? 'EFF6FF' : 'EEF2FF' },
+            line: { color: 'C7D2FE', width: 1 },
+            radius: 0.12,
+          } as any);
+          slide.addText(item, {
+            x: baseX + 0.12,
+            y: y + 0.1,
+            w: boxW - 0.24,
+            h: boxH - 0.2,
+            fontSize: 12,
+            color: '1F2937',
+            bold: false,
+            valign: 'mid',
+            align: 'left',
+          } as any);
+          if (i < flowItems.length - 1) {
+            slide.addShape(pptx.ShapeType.chevron, {
+              x: baseX + boxW / 2 - 0.15,
+              y: y + boxH + 0.06,
+              w: 0.3,
+              h: 0.22,
+              fill: { color: '94A3B8' },
+              line: { color: '94A3B8', width: 0.5 },
+            } as any);
+          }
+        });
+      }
 
       // Footer sources (compact)
       const citations = Array.isArray(s.citations) ? s.citations : [];

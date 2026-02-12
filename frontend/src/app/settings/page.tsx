@@ -10,7 +10,7 @@ const defaultProvider = 'openai';
 
 const presets = [
   { label: 'ollama.kabu-ai.jp', value: defaultBaseUrl },
-  { label: 'ollama.wgzhao.mac.work (old)', value: 'https://ollama.wgzhao.mac.work' },
+  { label: '100.93.85.78:11434', value: 'http://100.93.85.78:11434' },
 ];
 
 const providers = [

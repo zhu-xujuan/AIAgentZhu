@@ -56,7 +56,7 @@ quality = await check_quality_async(
 - メインが OpenAI 等の場合は **AI_OCR_BASE_URL** に Ollama の URL を指定すると、OCR 専用の Ollama クライアントが使われます。
 - 例（`backend/.env.local` または環境変数）:
   - `AI_OCR_MODEL=glm-ocr:bf16`
-  - （メインが Ollama でない場合）`AI_OCR_BASE_URL=https://ollama.wgzhao-mac.work`
+  - （メインが Ollama でない場合）`AI_OCR_BASE_URL=http://100.93.85.78:11434`
 - 利用する Ollama サーバーに glm-ocr モデルがインストールされている必要があります。
 
 ---

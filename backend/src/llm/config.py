@@ -57,7 +57,7 @@ class LLMConfig:
 
     # Provider settings
     provider: AIProvider = AIProvider.OPENAI
-    base_url: str = "https://ollama.wgzhao-mac.work"
+    base_url: str = "http://100.93.85.78:11434"
     api_key: Optional[str] = None
     model: str = "qwen3:30b"
     embedding_model: str = "nomic-embed-text"
@@ -192,7 +192,7 @@ def get_llm_config() -> LLMConfig:
     base_url = (
         os.getenv("AI_BASE_URL")
         or os.getenv("OLLAMA_BASE_URL")
-        or "https://ollama.wgzhao-mac.work"
+        or "http://100.93.85.78:11434"
     )
 
     # API Key

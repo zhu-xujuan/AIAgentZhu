@@ -7,6 +7,7 @@ import {
   ArrowUp,
   Copy,
   Download,
+  Eye,
   FileDown,
   Pencil,
   Plus,
@@ -203,6 +204,116 @@ function deckToMarkdown(deck: SlideDeck) {
   return lines.join('\n').trim() + '\n';
 }
 
+function escapeSlidevFrontmatter(value: string) {
+  const v = (value || '').trim();
+  if (!v) return '';
+  return v.replace(/"/g, '\\"').replace(/\r?\n/g, ' ');
+}
+
+function toMarkdownTable(table?: SlideTable | null) {
+  if (!hasTableData(table)) return '';
+  const headers = (table?.headers || []).map((h) => (h || '').trim());
+  const rows = (table?.rows || []).map((r) => (r || []).map((c) => (c || '').trim()));
+  const colCount = Math.max(headers.length, ...rows.map((r) => r.length), 0);
+  if (colCount === 0) return '';
+
+  const padRow = (r: string[]) => {
+    const next = r.slice(0, colCount);
+    while (next.length < colCount) next.push('');
+    return next;
+  };
+
+  const h = padRow(headers);
+  const lines: string[] = [];
+  lines.push(`| ${h.join(' | ')} |`);
+  lines.push(`| ${h.map(() => '---').join(' | ')} |`);
+  rows.map(padRow).forEach((r) => lines.push(`| ${r.join(' | ')} |`));
+  return lines.join('\n');
+}
+
+function deckToSlidevMarkdown(deck: SlideDeck) {
+  const lines: string[] = [];
+
+  lines.push('---');
+  lines.push(`title: "${escapeSlidevFrontmatter(deck.title || 'Slides')}"`);
+  if (deck.summary?.trim()) lines.push(`info: "${escapeSlidevFrontmatter(deck.summary)}"`);
+  lines.push('theme: default');
+  lines.push('---');
+  lines.push('');
+
+  // Cover slide
+  lines.push(`# ${deck.title || 'スライド資料'}`);
+  if (deck.summary?.trim()) {
+    lines.push('');
+    lines.push(deck.summary.trim());
+  }
+  lines.push('');
+
+  deck.slides.forEach((s) => {
+    lines.push('---');
+    lines.push('');
+    lines.push(`## ${s.title || 'Slide'}`);
+    lines.push('');
+
+    const bullets = (s.bullets || []).filter((b) => (b || '').trim().length > 0);
+    bullets.slice(0, 12).forEach((b) => lines.push(`- ${b}`));
+
+    const diagram = (s.diagram_mermaid || '').trim();
+    if (diagram) {
+      lines.push('');
+      lines.push('```mermaid');
+      lines.push(diagram);
+      lines.push('```');
+    }
+
+    const tableMd = toMarkdownTable(s.table);
+    if (tableMd) {
+      lines.push('');
+      lines.push(tableMd);
+    }
+
+    const imageSrc = getSlideImageSrc(s);
+    if (imageSrc) {
+      lines.push('');
+      lines.push(`![](${imageSrc})`);
+    } else {
+      const chartUrl = chartToQuickchartUrl(s.chart || null);
+      if (chartUrl) {
+        lines.push('');
+        lines.push(`![](${chartUrl})`);
+      }
+    }
+
+    const citations = s.citations || [];
+    if (citations.length > 0) {
+      const compact = citations
+        .slice(0, 3)
+        .map((c) => {
+          const title = (c.source_title || 'Source').trim();
+          const id = c.source_id != null ? `#${c.source_id}` : '';
+          return `${title}${id ? ` (${id})` : ''}`;
+        })
+        .filter(Boolean);
+      if (compact.length > 0) {
+        lines.push('');
+        lines.push(`<div class="text-xs opacity-60">Sources: ${compact.join(' / ')}</div>`);
+      }
+    }
+
+    const notes = (s.speaker_notes || '').trim();
+    if (notes) {
+      lines.push('');
+      lines.push('<!--');
+      lines.push(notes);
+      lines.push('-->');
+    }
+
+    lines.push('');
+  });
+
+  return lines.join('\n').trim() + '\n';
+}
+
 async function copyToClipboard(text: string) {
   await navigator.clipboard.writeText(text);
 }
@@ -304,8 +415,13 @@ export function SlideStudio({
   const [exportDiagramSvg, setExportDiagramSvg] = useState<string>('');
   const [exporting, setExporting] = useState<null | 'pptx' | 'pdf'>(null);
   const [exportIndex, setExportIndex] = useState<number>(0);
+  const [slidevPreviewOpen, setSlidevPreviewOpen] = useState(false);
+  const [slidevPreviewUrl, setSlidevPreviewUrl] = useState<string>('');
+  const [slidevPreviewError, setSlidevPreviewError] = useState<string | null>(null);
+  const [slidevPreviewLoading, setSlidevPreviewLoading] = useState(false);
   const exportSlideRef = useRef<HTMLDivElement>(null);
   const exportPngCacheRef = useRef<{ fingerprint: string; pngs: string[] } | null>(null);
+  const slidevSyncTimerRef = useRef<number | null>(null);
   const selectedSlide = useMemo(() => deck.slides[selectedIndex], [deck.slides, selectedIndex]);
   const [chartDraft, setChartDraft] = useState('');
   const [imagePromptDraft, setImagePromptDraft] = useState('');
@@ -328,6 +444,14 @@ export function SlideStudio({
     setSelectedDiagramSvg('');
     setExportDiagramSvg('');
     setExporting(null);
+    setSlidevPreviewOpen(false);
+    setSlidevPreviewUrl('');
+    setSlidevPreviewError(null);
+    setSlidevPreviewLoading(false);
+    if (slidevSyncTimerRef.current != null) {
+      window.clearTimeout(slidevSyncTimerRef.current);
+      slidevSyncTimerRef.current = null;
+    }
   }, [open]);
 
   useEffect(() => {
@@ -423,6 +547,60 @@ export function SlideStudio({
   };
 
   const markdown = deckToMarkdown(deck);
+  const slidevMarkdown = deckToSlidevMarkdown(deck);
+
+  const ensureSlidevPreview = async () => {
+    setSlidevPreviewLoading(true);
+    setSlidevPreviewError(null);
+    try {
+      const response = await fetch('/api/slides/slidev', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markdown: slidevMarkdown }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `HTTP error: ${response.status}`);
+      }
+      const data = await response.json();
+      const url = typeof data?.url === 'string' ? data.url : '';
+      if (!url) throw new Error('Slidev preview URL missing');
+      setSlidevPreviewUrl(url);
+      setSlidevPreviewOpen(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Slidev preview failed';
+      setSlidevPreviewError(msg);
+      setSlidevPreviewOpen(true);
+    } finally {
+      setSlidevPreviewLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!slidevPreviewOpen) return;
+    if (!slidevPreviewUrl) return;
+    if (slidevPreviewLoading) return;
+
+    if (slidevSyncTimerRef.current != null) window.clearTimeout(slidevSyncTimerRef.current);
+    slidevSyncTimerRef.current = window.setTimeout(async () => {
+      try {
+        await fetch('/api/slides/slidev', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ markdown: slidevMarkdown }),
+        });
+      } catch {
+        // ignore
+      }
+    }, 800);
+
+    return () => {
+      if (slidevSyncTimerRef.current != null) {
+        window.clearTimeout(slidevSyncTimerRef.current);
+        slidevSyncTimerRef.current = null;
+      }
+    };
+  }, [slidevPreviewOpen, slidevPreviewUrl, slidevPreviewLoading, slidevMarkdown]);
 
   const renderMermaidToSvg = async (code: string) => {
     const trimmed = (code || '').trim();
@@ -620,6 +798,29 @@ export function SlideStudio({
             </button>
             <button
               type="button"
+              onClick={() => downloadText('slides.slidev.md', slidevMarkdown)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs hover:bg-accent transition-colors"
+              disabled={busy || exporting !== null || deck.slides.length === 0}
+              title="Slidev用Markdownをダウンロード"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Slidev
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (slidevPreviewOpen) setSlidevPreviewOpen(false);
+                else void ensureSlidevPreview();
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs hover:bg-accent transition-colors"
+              disabled={busy || exporting !== null || deck.slides.length === 0}
+              title={slidevPreviewOpen ? 'Slidevプレビューを閉じる' : 'Slidevプレビューを開く'}
+            >
+              <Eye className="w-3.5 h-3.5" />
+              Preview
+            </button>
+            <button
+              type="button"
               onClick={exportPptx}
               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs hover:bg-accent transition-colors"
               disabled={busy || exporting !== null || deck.slides.length === 0}
@@ -756,17 +957,18 @@ export function SlideStudio({
                 })
               )}
             </div>
-          </div>
+	          </div>
 
-          {/* Editor */}
-          <div className="flex-1 min-w-0 flex flex-col">
-            {selectedSlide ? (
-              <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
-                {/* Preview */}
-                <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-                    <Pencil className="w-3.5 h-3.5" />
-                    Preview
+	          <div className="flex-1 min-w-0 flex">
+	            {/* Editor */}
+	            <div className="flex-1 min-w-0 flex flex-col">
+	              {selectedSlide ? (
+	                <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+	                {/* Preview */}
+	                <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+	                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
+	                    <Pencil className="w-3.5 h-3.5" />
+	                    Preview
                   </div>
                   <div className="text-lg font-semibold text-foreground">
                     {selectedSlide.title || 'Slide'}
@@ -1014,8 +1216,8 @@ export function SlideStudio({
                 </div>
 
                 {/* AI refine */}
-                {onRequestRefine && (
-                  <div className="rounded-xl border border-border bg-card p-3">
+	                {onRequestRefine && (
+	                  <div className="rounded-xl border border-border bg-card p-3">
                     <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
                       <Sparkles className="w-3.5 h-3.5" />
                       AI Edit
@@ -1046,22 +1248,77 @@ export function SlideStudio({
                       文書にない情報は追加されません（引用ベース）。
                     </div>
                   </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" />
-                  Slides を追加してください
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
+	                )}
+	                </div>
+	              ) : (
+	                <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+	                  <div className="flex items-center gap-2">
+	                    <Sparkles className="w-4 h-4" />
+	                    Slides を追加してください
+	                  </div>
+	                </div>
+	              )}
+	            </div>
 
-        {/* Footer */}
-        <div className="px-4 py-3 border-t border-border bg-card text-xs text-muted-foreground">
-          PPTXは編集可能なテキスト中心、PDFは見た目優先（画像ベース）で出力します。
+	            {/* Slidev Preview */}
+	            {slidevPreviewOpen && (
+	              <div className="w-[520px] xl:w-[640px] border-l border-border bg-card/30 flex flex-col min-w-0">
+	                <div className="px-3 py-2.5 border-b border-border flex items-center justify-between gap-2">
+	                  <div className="text-xs font-medium text-muted-foreground flex items-center gap-2">
+	                    <Eye className="w-3.5 h-3.5" />
+	                    Slidev Preview
+	                  </div>
+	                  <div className="flex items-center gap-1.5">
+	                    <button
+	                      type="button"
+	                      onClick={() => void ensureSlidevPreview()}
+	                      className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] hover:bg-accent transition-colors"
+	                      disabled={busy || exporting !== null || slidevPreviewLoading}
+	                      title="プレビューを更新"
+	                    >
+	                      <RefreshCw className={cn('w-3.5 h-3.5', slidevPreviewLoading && 'animate-spin')} />
+	                      Refresh
+	                    </button>
+	                    <button
+	                      type="button"
+	                      onClick={() => setSlidevPreviewOpen(false)}
+	                      className="inline-flex items-center justify-center rounded-md border border-border bg-background p-1.5 hover:bg-accent transition-colors"
+	                      aria-label="Close Slidev Preview"
+	                      disabled={busy || exporting !== null}
+	                    >
+	                      <X className="w-3.5 h-3.5" />
+	                    </button>
+	                  </div>
+	                </div>
+
+	                {slidevPreviewError ? (
+	                  <div className="p-3 text-xs text-destructive">
+	                    {slidevPreviewError}
+	                  </div>
+	                ) : !slidevPreviewUrl ? (
+	                  <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+	                    Starting Slidev…
+	                  </div>
+	                ) : (
+	                  <iframe
+	                    title="Slidev Preview"
+	                    src={slidevPreviewUrl}
+	                    className="flex-1 w-full bg-white"
+	                    referrerPolicy="no-referrer"
+	                  />
+	                )}
+
+	                <div className="px-3 py-2 border-t border-border text-[11px] text-muted-foreground">
+	                  このプレビューは Slidev dev server を利用します（Docker の場合は `3030` ポートを使用）。
+	                </div>
+	              </div>
+	            )}
+	          </div>
+	        </div>
+
+	        {/* Footer */}
+	        <div className="px-4 py-3 border-t border-border bg-card text-xs text-muted-foreground">
+	          PPTXは編集可能なテキスト中心、PDFは見た目優先（画像ベース）で出力します。
         </div>
       </div>
 

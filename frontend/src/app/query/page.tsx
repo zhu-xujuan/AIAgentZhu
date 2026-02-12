@@ -114,6 +114,32 @@ interface ChatMessage {
   questionText?: string;
 }
 
+function deckHasSubstantialContent(deck: SlideDeck | null | undefined) {
+  if (!deck || !Array.isArray(deck.slides) || deck.slides.length === 0) return false;
+  return deck.slides.some((s) => {
+    const bullets = Array.isArray(s.bullets) ? s.bullets.filter((b) => (b || '').trim().length > 0) : [];
+    const hasTable =
+      !!s.table &&
+      ((Array.isArray(s.table.headers) && s.table.headers.length > 0) ||
+        (Array.isArray(s.table.rows) && s.table.rows.length > 0));
+    const hasDiagram = !!(s.diagram_mermaid || '').trim();
+    const hasImage = !!(s.image_url || '').trim() || !!(s.image_data_url || '').trim();
+    const hasChart = !!s.chart && !!s.chart.type;
+    return bullets.length > 0 || hasTable || hasDiagram || hasImage || hasChart;
+  });
+}
+
+async function getErrorMessageFromResponse(response: Response, fallback: string) {
+  const raw = await response.text();
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw) as { detail?: string; error?: string; message?: string };
+    return parsed.detail || parsed.error || parsed.message || fallback;
+  } catch {
+    return raw;
+  }
+}
+
 export default function QueryPage() {
   const [question, setQuestion] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -128,6 +154,7 @@ export default function QueryPage() {
   >({});
   const [slideBusyMessageId, setSlideBusyMessageId] = useState<string | null>(null);
   const [slideError, setSlideError] = useState<string | null>(null);
+  const [slideErrorMessageId, setSlideErrorMessageId] = useState<string | null>(null);
 
   const { files, isUploading, completedCount, totalCount } = useUpload();
   const hasUploads = files.length > 0;
@@ -144,12 +171,14 @@ export default function QueryPage() {
 
   const openSlideStudio = useCallback((messageId: string) => {
     setSlideError(null);
+    setSlideErrorMessageId(null);
     setActiveSlideMessageId(messageId);
   }, []);
 
   const closeSlideStudio = useCallback(() => {
     setActiveSlideMessageId(null);
     setSlideError(null);
+    setSlideErrorMessageId(null);
   }, []);
 
   const handleStreamingQuery = async (questionText: string, messageId: string, mode: SearchMode, skipCache = false) => {
@@ -330,13 +359,14 @@ export default function QueryPage() {
     if (!questionText) return;
 
     const existing = slideDecks[message.id];
-    if (existing) {
+    if (existing && existing.deck.slides.length >= 3 && deckHasSubstantialContent(existing.deck)) {
       openSlideStudio(message.id);
       return;
     }
 
     setSlideBusyMessageId(message.id);
     setSlideError(null);
+    setSlideErrorMessageId(null);
 
     try {
       const response = await fetch(`${API_BASE}/pipeline/slides/generate`, {
@@ -346,11 +376,14 @@ export default function QueryPage() {
           question: questionText,
           answer: message.content,
           mode: (message.result?.mode as SearchMode | undefined) || searchMode,
-          max_slides: 8,
+          max_slides: 4,
         }),
       });
 
-      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+      if (!response.ok) {
+        const detail = await getErrorMessageFromResponse(response, `HTTP error: ${response.status}`);
+        throw new Error(detail);
+      }
       const data = await response.json();
 
       const deck = withSlideIds(data.deck as SlideDeck, `deck-${message.id}`);
@@ -364,6 +397,7 @@ export default function QueryPage() {
       openSlideStudio(message.id);
     } catch (err) {
       setSlideError(err instanceof Error ? err.message : 'Slide generation failed');
+      setSlideErrorMessageId(message.id);
     } finally {
       setSlideBusyMessageId(null);
     }
@@ -376,6 +410,7 @@ export default function QueryPage() {
 
     setSlideBusyMessageId(activeSlideMessageId);
     setSlideError(null);
+    setSlideErrorMessageId(null);
 
     try {
       const response = await fetch(`${API_BASE}/pipeline/slides/refine`, {
@@ -386,11 +421,14 @@ export default function QueryPage() {
           instruction,
           deck: current.deck,
           mode: current.mode,
-          max_slides: 8,
+          max_slides: 4,
         }),
       });
 
-      if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+      if (!response.ok) {
+        const detail = await getErrorMessageFromResponse(response, `HTTP error: ${response.status}`);
+        throw new Error(detail);
+      }
       const data = await response.json();
       const deck = withSlideIds(data.deck as SlideDeck, `deck-${activeSlideMessageId}`);
 
@@ -400,6 +438,7 @@ export default function QueryPage() {
       }));
     } catch (err) {
       setSlideError(err instanceof Error ? err.message : 'Slide refine failed');
+      setSlideErrorMessageId(activeSlideMessageId);
     } finally {
       setSlideBusyMessageId(null);
     }
@@ -531,6 +570,9 @@ export default function QueryPage() {
                               )}
                               スライド
                             </button>
+                            {slideError && slideErrorMessageId === message.id && (
+                              <span className="text-[11px] text-destructive">{slideError}</span>
+                            )}
                             {message.result.from_cache && (
                               <>
                                 <MetadataBadge variant="info">
@@ -628,7 +670,7 @@ export default function QueryPage() {
           open={true}
           deck={activeSlideState.deck}
           busy={slideBusyMessageId === activeSlideMessageId}
-          error={slideError}
+          error={activeSlideMessageId === slideErrorMessageId ? slideError : null}
           onClose={closeSlideStudio}
           onDeckChange={(next) => {
             if (!activeSlideMessageId) return;

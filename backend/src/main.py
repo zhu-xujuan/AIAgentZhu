@@ -4,6 +4,7 @@ Provides endpoints for Dify integration.
 Supports LLM-enhanced processing via Ollama with rule-based fallback.
 """
 
+import asyncio
 import os
 import sys
 import logging
@@ -33,6 +34,7 @@ IMAGE_GEN_SIZE = os.getenv("IMAGE_GEN_SIZE", "1024x1024")
 IMAGE_GEN_QUALITY = os.getenv("IMAGE_GEN_QUALITY", "medium")
 IMAGE_GEN_MAX_PER_DECK = int(os.getenv("IMAGE_GEN_MAX_PER_DECK", "6"))
 IMAGE_GEN_TIMEOUT = int(os.getenv("IMAGE_GEN_TIMEOUT", "60"))
+SLIDE_GENERATION_TIMEOUT = float(os.getenv("SLIDE_GENERATION_TIMEOUT", "60"))
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,6 +63,7 @@ from src.agents.slide_agent import (
     SLIDE_SYSTEM_PROMPT,
     build_generate_slide_prompt,
     build_refine_slide_prompt,
+    enrich_slide_deck,
     format_slide_sources_for_prompt,
     normalize_slide_deck,
     retrieve_sources_for_slides,
@@ -1804,6 +1807,7 @@ async def generate_slides(request: SlideDeckGenerateRequest):
         raise HTTPException(status_code=503, detail="LLM not available")
 
     started = time.time()
+    slide_timeout = float(os.getenv("SLIDE_GENERATION_TIMEOUT", str(SLIDE_GENERATION_TIMEOUT)))
     question = request.question
     mode = request.mode or "standard"
     max_slides = int(request.max_slides or 8)
@@ -1826,15 +1830,37 @@ async def generate_slides(request: SlideDeckGenerateRequest):
             max_slides=max_slides,
         )
 
-        deck_raw, err = await ollama_client.generate_json(
-            prompt=prompt,
-            temperature=0.2,
-            system=SLIDE_SYSTEM_PROMPT,
-        )
-        if err or deck_raw is None:
-            raise RuntimeError(err or "Failed to generate slide deck JSON")
+        fallback_reason: Optional[str] = None
+        try:
+            deck_raw, err = await asyncio.wait_for(
+                ollama_client.generate_json(
+                    prompt=prompt,
+                    temperature=0.2,
+                    system=SLIDE_SYSTEM_PROMPT,
+                ),
+                timeout=slide_timeout,
+            )
+            if err or deck_raw is None:
+                raise RuntimeError(err or "Failed to generate slide deck JSON")
+            deck = normalize_slide_deck(deck_raw)
+        except asyncio.TimeoutError:
+            fallback_reason = (
+                f"Timed out after {slide_timeout:.0f}s, returned fallback deck"
+            )
+            logger.warning(f"[SLIDES] Generate timeout -> fallback: q={question[:80]}")
+            deck = {"title": question, "summary": "", "slides": []}
+        except Exception as e:
+            fallback_reason = f"LLM generation failed ({str(e)[:120]}), returned fallback deck"
+            logger.warning(f"[SLIDES] Generate error -> fallback: {e}")
+            deck = {"title": question, "summary": "", "slides": []}
 
-        deck = normalize_slide_deck(deck_raw)
+        deck = enrich_slide_deck(
+            deck=deck,
+            question=question,
+            answer=request.answer,
+            sources=sources_for_prompt,
+            max_slides=max_slides,
+        )
         deck = await maybe_attach_generated_images(deck)
 
         return {
@@ -1843,7 +1869,11 @@ async def generate_slides(request: SlideDeckGenerateRequest):
             "sources": sources_for_prompt,
             "mode": mode,
             "generation_time_seconds": round(time.time() - started, 2),
+            "fallback": fallback_reason is not None,
+            "warning": fallback_reason,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SLIDES] Generate failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1862,6 +1892,7 @@ async def refine_slides(request: SlideDeckRefineRequest):
         raise HTTPException(status_code=503, detail="LLM not available")
 
     started = time.time()
+    slide_timeout = float(os.getenv("SLIDE_GENERATION_TIMEOUT", str(SLIDE_GENERATION_TIMEOUT)))
     question = request.question
     mode = request.mode or "standard"
     max_slides = int(request.max_slides or 8)
@@ -1885,15 +1916,37 @@ async def refine_slides(request: SlideDeckRefineRequest):
             max_slides=max_slides,
         )
 
-        deck_raw, err = await ollama_client.generate_json(
-            prompt=prompt,
-            temperature=0.2,
-            system=SLIDE_SYSTEM_PROMPT,
-        )
-        if err or deck_raw is None:
-            raise RuntimeError(err or "Failed to refine slide deck JSON")
+        fallback_reason: Optional[str] = None
+        try:
+            deck_raw, err = await asyncio.wait_for(
+                ollama_client.generate_json(
+                    prompt=prompt,
+                    temperature=0.2,
+                    system=SLIDE_SYSTEM_PROMPT,
+                ),
+                timeout=slide_timeout,
+            )
+            if err or deck_raw is None:
+                raise RuntimeError(err or "Failed to refine slide deck JSON")
+            deck = normalize_slide_deck(deck_raw)
+        except asyncio.TimeoutError:
+            fallback_reason = (
+                f"Refine timed out after {slide_timeout:.0f}s, returned fallback deck"
+            )
+            logger.warning(f"[SLIDES] Refine timeout -> fallback: q={question[:80]}")
+            deck = normalize_slide_deck(request.deck if isinstance(request.deck, dict) else {})
+        except Exception as e:
+            fallback_reason = f"Refine failed ({str(e)[:120]}), returned fallback deck"
+            logger.warning(f"[SLIDES] Refine error -> fallback: {e}")
+            deck = normalize_slide_deck(request.deck if isinstance(request.deck, dict) else {})
 
-        deck = normalize_slide_deck(deck_raw)
+        deck = enrich_slide_deck(
+            deck=deck,
+            question=question,
+            answer=None,
+            sources=sources_for_prompt,
+            max_slides=max_slides,
+        )
         deck = await maybe_attach_generated_images(deck)
 
         return {
@@ -1902,7 +1955,11 @@ async def refine_slides(request: SlideDeckRefineRequest):
             "sources": sources_for_prompt,
             "mode": mode,
             "generation_time_seconds": round(time.time() - started, 2),
+            "fallback": fallback_reason is not None,
+            "warning": fallback_reason,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SLIDES] Refine failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

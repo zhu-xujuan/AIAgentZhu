@@ -188,6 +188,25 @@ AIAgent/
 2. 質問を入力（例: 「契約書の有効期限はいつまで？」）
 3. システムが関連ドキュメントを検索し、AIが回答を生成
 
+### スライド作成・出力（Slide Studio）
+
+1. Query の回答から「Slides」を生成して Slide Studio を開く
+2. 内容を編集して出力
+   - `PPTX`: アプリ内で生成（編集可能テキスト中心）
+   - `PDF`: アプリ内で生成（見た目優先・画像ベース）
+   - `Slidev`: `slides.slidev.md` をダウンロードして Slidev でプレビュー/エクスポート（または Slide Studio 内の `Preview` で埋め込みプレビュー）
+
+```bash
+# プレビュー
+npx -y @slidev/cli slides.slidev.md
+
+# エクスポート（例）
+npx -y @slidev/cli export slides.slidev.md --format pdf
+npx -y @slidev/cli export slides.slidev.md --format pptx
+```
+
+※ Slide Studio 内の `Preview` は Slidev dev server を起動します（Docker では `3030` ポートを使用）。
+
 ### ドキュメント一覧
 
 - アップロードされたすべてのドキュメントを確認

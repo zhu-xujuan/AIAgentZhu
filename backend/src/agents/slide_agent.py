@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Optional, TYPE_CHECKING
 
 from src.agents.qa_agent import deduplicate_results, expand_query_with_llm
@@ -30,6 +31,123 @@ SLIDE_SYSTEM_PROMPT = """あなたは社内文書の内容に基づいて資料�
 """
 
 
+def _normalize_line(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _sentences_from_text(text: str) -> list[str]:
+    raw = _normalize_line(text)
+    if not raw:
+        return []
+    parts = re.split(r"[。！？\.\!\?]\s*|\n+", raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        p = _normalize_line(p)
+        if len(p) < 8:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(_compact_text(p, 90))
+    return out
+
+
+def _build_seed_points(answer: Optional[str], sources: list[dict[str, Any]]) -> list[str]:
+    points: list[str] = []
+    seen: set[str] = set()
+    for text in [answer or ""] + [str(s.get("text") or "") for s in (sources or [])]:
+        for sent in _sentences_from_text(text):
+            if sent in seen:
+                continue
+            seen.add(sent)
+            points.append(sent)
+    return points
+
+
+def _build_default_mermaid(title: str, bullets: list[str]) -> str:
+    nodes = [title] + bullets[:3]
+    safe_nodes: list[str] = []
+    for n in nodes:
+        cleaned = re.sub(r"[^0-9A-Za-z\u3040-\u30ff\u4e00-\u9fff _-]", "", n).strip()
+        safe_nodes.append(cleaned or "Step")
+    lines = ["flowchart TD"]
+    lines.append(f"  A[{safe_nodes[0]}]")
+    for i, node in enumerate(safe_nodes[1:], 1):
+        node_id = chr(ord("A") + i)
+        prev_id = chr(ord("A") + i - 1)
+        lines.append(f"  {prev_id} --> {node_id}[{node}]")
+    return "\n".join(lines)
+
+
+def _build_default_table(bullets: list[str]) -> dict[str, Any]:
+    rows = [[f"要点 {i + 1}", b] for i, b in enumerate(bullets[:4])]
+    return {
+        "headers": ["項目", "内容"],
+        "rows": rows,
+    }
+
+
+def _build_fallback_slides(
+    question: str,
+    seed_points: list[str],
+    max_slides: int,
+) -> list[dict[str, Any]]:
+    target = max(2, min(max_slides, 6))
+    themes = [
+        "概要",
+        "主要ポイント",
+        "ワークフロー",
+        "比較・整理",
+        "実行計画",
+        "まとめ",
+    ]
+    slides: list[dict[str, Any]] = []
+    cursor = 0
+
+    def pick_points(count: int) -> list[str]:
+        nonlocal cursor
+        out: list[str] = []
+        while cursor < len(seed_points) and len(out) < count:
+            out.append(seed_points[cursor])
+            cursor += 1
+        return out
+
+    for i in range(target):
+        theme = themes[i]
+        title = f"{theme}: {question}" if i == 0 else theme
+        bullets = pick_points(4)
+        if len(bullets) < 3:
+            bullets.extend(
+                [
+                    _compact_text(f"{theme}の要点を明確化する", 90),
+                    _compact_text("文書の根拠と背景を整理する", 90),
+                    _compact_text("次の判断・アクションにつなげる", 90),
+                ][: max(0, 3 - len(bullets))]
+            )
+
+        slide: dict[str, Any] = {
+            "title": _compact_text(title, 50),
+            "bullets": bullets[:8],
+            "diagram_mermaid": "",
+            "table": None,
+            "image_url": "",
+            "image_prompt": (
+                "minimal flat icon illustration, clean corporate style, "
+                f"topic: {theme}"
+            ),
+            "chart": None,
+            "speaker_notes": "",
+            "citations": [],
+        }
+        if i in (0, 2):
+            slide["diagram_mermaid"] = _build_default_mermaid(slide["title"], slide["bullets"])
+        elif i in (1, 3):
+            slide["table"] = _build_default_table(slide["bullets"])
+        slides.append(slide)
+    return slides
+
+
 def _compact_text(text: str, max_chars: int) -> str:
     text = (text or "").strip()
     if len(text) <= max_chars:
@@ -39,8 +157,8 @@ def _compact_text(text: str, max_chars: int) -> str:
 
 def format_slide_sources_for_prompt(
     search_results: list["SearchResult"],
-    max_sources: int = 10,
-    max_chars_per_source: int = 900,
+    max_sources: int = 6,
+    max_chars_per_source: int = 500,
 ) -> list[dict[str, Any]]:
     """
     Format search results into a compact, ID-addressable structure for prompts.
@@ -126,12 +244,14 @@ def build_generate_slide_prompt(
 ## 出力要件
 - 最大 {max_slides} 枚
 - 1枚あたり 3〜6 bullet
+- bullets は空配列にしない（必ず3項目以上）
 - bullets は短く（1行で読める）
-- 可能なら diagram_mermaid に Mermaid 記法の簡単な図（フローチャート等）を入れる（不要なら空/省略）
-- 比較や一覧に向く場合は table（headers/rows）を入れる（不要なら空/省略）
+- 各スライドに最低1つの視覚要素を入れる（diagram_mermaid / table / chart / image_prompt のいずれか）
+- 可能なら diagram_mermaid に Mermaid 記法の簡単な図（フローチャート等）を入れる
+- 比較や一覧に向く場合は table（headers/rows）を入れる
 - image_url は参考文書に明記されている場合のみ入れる（推測でURLを作らない）
 - グラフが効果的なら chart を入れる（type/labels/datasets）。数値は参考文書にある場合のみ使う
-- 文書に明記がない場合は、例示（「例」「イメージ」）として抽象的な図・表・フローや image_prompt を作ってもよいが、事実と誤解される具体的数値や固有名は使わない
+- 文書に明記がない場合は、例示（「例」「イメージ」）として抽象的な図・表・フローや image_prompt（アイコン風イラスト指示）を作ってもよいが、事実と誤解される具体的数値や固有名は使わない
 - citations は可能な限り付ける（source_id, source_title, quote）
 - quote は参考文書 text からの短い抜粋（120文字以内）
 
@@ -165,11 +285,13 @@ def build_refine_slide_prompt(
 ## 出力要件
 - 最大 {max_slides} 枚（必要なら減らしてよい）
 - 1枚あたり 3〜6 bullet
+- bullets は空配列にしない（必ず3項目以上）
 - 文書にない情報は追加しない
+- 各スライドに最低1つの視覚要素を入れる（diagram_mermaid / table / chart / image_prompt のいずれか）
 - diagram_mermaid は必要に応じて更新してよい（文書根拠に基づく）
 - table は必要に応じて更新してよい（文書根拠に基づく）
 - image_url は参考文書に明記されている場合のみ維持/追加（推測でURLを作らない）
-- image_prompt は必要に応じて更新してよい（抽象的な表現、固有名や具体数値は避ける）
+- image_prompt は必要に応じて更新してよい（抽象的な表現、固有名や具体数値は避ける。アイコン/図解風を優先）
 - chart は必要に応じて更新してよい（文書根拠に基づく）。文書に明記がない場合は例示として抽象的な図・表・フローを作ってもよい
 - citations は可能な限り維持/追加（source_id, source_title, quote）
 
@@ -346,6 +468,102 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
         "summary": summary or "",
         "slides": slides_out,
     }
+
+
+def enrich_slide_deck(
+    *,
+    deck: dict[str, Any],
+    question: str,
+    answer: Optional[str],
+    sources: list[dict[str, Any]],
+    max_slides: int,
+) -> dict[str, Any]:
+    """
+    Ensure deck has practical content even when model returns sparse slides.
+    Adds fallback bullets and at least one visual element per slide.
+    """
+    slides = deck.get("slides") or []
+    if not isinstance(slides, list):
+        slides = []
+
+    seed_points = _build_seed_points(answer, sources)
+    seed_idx = 0
+
+    def next_points(count: int) -> list[str]:
+        nonlocal seed_idx
+        picked: list[str] = []
+        while seed_idx < len(seed_points) and len(picked) < count:
+            picked.append(seed_points[seed_idx])
+            seed_idx += 1
+        return picked
+
+    if len(slides) == 0:
+        slides = _build_fallback_slides(question, seed_points, max_slides)
+
+    slides = slides[: max(1, min(max_slides, 20))]
+    first_source = sources[0] if sources else {}
+    fallback_citation = {
+        "source_id": first_source.get("source_id"),
+        "source_title": str(first_source.get("document_name") or "").strip(),
+        "quote": _compact_text(str(first_source.get("text") or ""), 120),
+    }
+
+    for idx, slide in enumerate(slides):
+        if not isinstance(slide, dict):
+            slides[idx] = {"title": "Slide", "bullets": []}
+            slide = slides[idx]
+
+        bullets = slide.get("bullets") or []
+        if not isinstance(bullets, list):
+            bullets = []
+        bullets = [str(b).strip() for b in bullets if str(b).strip()]
+        if len(bullets) < 3:
+            bullets.extend(next_points(4 - len(bullets)))
+        if len(bullets) < 3:
+            title = str(slide.get("title") or f"Slide {idx + 1}").strip()
+            bullets.extend(
+                [
+                    _compact_text(f"{title} の要点を整理する", 90),
+                    _compact_text("関連文書の根拠を確認する", 90),
+                    _compact_text("次のアクションを定義する", 90),
+                ][: max(0, 3 - len(bullets))]
+            )
+        slide["bullets"] = bullets[:8]
+
+        citations = slide.get("citations") or []
+        if not isinstance(citations, list):
+            citations = []
+        if len(citations) == 0 and fallback_citation.get("source_title"):
+            citations = [fallback_citation]
+        slide["citations"] = citations[:6]
+
+        has_diagram = bool(str(slide.get("diagram_mermaid") or "").strip())
+        has_table = isinstance(slide.get("table"), dict) and bool(
+            (slide.get("table") or {}).get("headers") or (slide.get("table") or {}).get("rows")
+        )
+        has_chart = isinstance(slide.get("chart"), dict) and bool((slide.get("chart") or {}).get("type"))
+        has_image = bool(
+            str(slide.get("image_url") or "").strip()
+            or str(slide.get("image_data_url") or "").strip()
+        )
+
+        if not (has_diagram or has_table or has_chart or has_image):
+            if idx % 2 == 0:
+                slide["diagram_mermaid"] = _build_default_mermaid(
+                    str(slide.get("title") or f"Slide {idx + 1}"),
+                    slide["bullets"],
+                )
+            else:
+                slide["table"] = _build_default_table(slide["bullets"])
+            slide["image_prompt"] = (
+                "minimal flat icon illustration, clean corporate style, "
+                f"topic: {str(slide.get('title') or '').strip()}"
+            )
+
+    deck["slides"] = slides
+    if not str(deck.get("summary") or "").strip() and answer:
+        deck["summary"] = _compact_text(answer, 180)
+    return deck
 
 
 async def retrieve_sources_for_slides(

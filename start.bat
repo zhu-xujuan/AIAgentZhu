@@ -64,6 +64,12 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000" ^| findstr "LISTENING
     taskkill /F /PID %%a >nul 2>&1
 )
 
+REM Kill all processes on port 3030 (Slidev Preview)
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3030" ^| findstr "LISTENING" 2^>nul') do (
+    echo Stopping process %%a on port 3030...
+    taskkill /F /PID %%a >nul 2>&1
+)
+
 REM Also kill any python processes running uvicorn
 taskkill /F /IM python.exe /FI "WINDOWTITLE eq AIAgent Backend*" >nul 2>&1
 

@@ -34,6 +34,13 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000" ^| findstr "LISTENING
     taskkill /F /PID %%a >nul 2>&1
 )
 
+REM Kill all processes on port 3030 (Slidev Preview)
+echo Stopping Slidev preview (port 3030)...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3030" ^| findstr "LISTENING"') do (
+    echo   Killing PID %%a
+    taskkill /F /PID %%a >nul 2>&1
+)
+
 REM Kill any remaining node processes for frontend
 taskkill /F /IM node.exe /FI "WINDOWTITLE eq AIAgent Frontend*" >nul 2>&1
 
