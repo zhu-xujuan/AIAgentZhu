@@ -27,6 +27,7 @@ export type SlideCitation = {
 export type Slide = {
   id?: string;
   title: string;
+  layout?: 'title' | 'content' | 'visual' | 'table' | 'chart' | 'comparison' | null;
   bullets: string[];
   diagram_mermaid?: string;
   table?: SlideTable | null;
@@ -151,6 +152,104 @@ function buildDefaultImagePrompt(slide?: Slide | null) {
   const bullets = (slide.bullets || []).slice(0, 6).join('; ');
   const base = `${slide.title || 'Slide'}. ${bullets}`.trim();
   return `${base}. Abstract flat vector illustration, clean, minimal, soft colors, no text, no numbers, no logos.`;
+}
+
+// ============================================================
+// SLIDE PREVIEW STYLING
+// ============================================================
+
+const PREVIEW_COLORS = {
+  primary: '#4F46E5',
+  primaryLight: '#EEF2FF',
+  primaryMid: '#C7D2FE',
+  primaryDark: '#3730A3',
+  secondary: '#0EA5E9',
+  secondaryLight: '#E0F2FE',
+  accent3: '#10B981',
+  accent6: '#8B5CF6',
+  text: '#111827',
+  textLight: '#6B7280',
+  textMuted: '#9CA3AF',
+  border: '#E5E7EB',
+  background: '#FFFFFF',
+  backgroundAlt: '#F9FAFB',
+};
+
+const TOPIC_ICONS: Record<string, string> = {
+  '概要': '📋', '紹介': '👋', 'まとめ': '✅', '結論': '🎯',
+  '比較': '⚖️', '分析': '📊', 'データ': '📈', 'ワークフロー': '🔄',
+  'プロセス': '⚙️', '計画': '📅', '課題': '⚠️', '問題': '❗',
+  '解決': '💡', '提案': '💡', 'ポイント': '📌', '要点': '📌',
+  'チーム': '👥', '組織': '🏢', 'コスト': '💰', '技術': '🔧',
+  'セキュリティ': '🔒', '品質': '✨', '目標': '🎯',
+  'overview': '📋', 'summary': '✅', 'conclusion': '🎯',
+  'comparison': '⚖️', 'analysis': '📊', 'workflow': '🔄',
+  'process': '⚙️', 'plan': '📅', 'issue': '⚠️', 'solution': '💡',
+  'team': '👥', 'cost': '💰', 'technology': '🔧', 'security': '🔒',
+};
+
+function getIconForTitle(title: string): string {
+  const lowerTitle = title.toLowerCase();
+  for (const [keyword, icon] of Object.entries(TOPIC_ICONS)) {
+    if (lowerTitle.includes(keyword.toLowerCase())) return icon;
+  }
+  return '📄';
+}
+
+type SlideLayoutType = 'title' | 'content' | 'visual' | 'table' | 'chart' | 'card';
+
+// Card accent colors (matching PPTX)
+const CARD_ACCENT_COLORS = [
+  '#F4A261',  // Orange
+  '#6BB8C9',  // Cyan
+  '#10B981',  // Green (Emerald)
+  '#E91E63',  // Pink
+  '#8B5CF6',  // Violet
+  '#F59E0B',  // Amber
+];
+
+function hasValidChartData(chart?: SlideChart | null): boolean {
+  if (!chart || !chart.type) return false;
+  const labels = Array.isArray(chart.labels) ? chart.labels : [];
+  const datasets = Array.isArray(chart.datasets) ? chart.datasets : [];
+  if (labels.length === 0 || datasets.length === 0) return false;
+  return datasets.some(ds => Array.isArray(ds.data) && ds.data.length > 0 && ds.data.some(v => typeof v === 'number' && v !== 0));
+}
+
+function hasValidTableDataCheck(table?: SlideTable | null): boolean {
+  if (!table) return false;
+  const headers = Array.isArray(table.headers) ? table.headers : [];
+  const rows = Array.isArray(table.rows) ? table.rows : [];
+  const hasHeaders = headers.some(h => h && h.trim().length > 0);
+  const hasRows = rows.some(r => Array.isArray(r) && r.some(c => c && c.trim().length > 0));
+  return hasHeaders || hasRows;
+}
+
+function detectSlideLayout(slide: Slide, idx: number): SlideLayoutType {
+  if (idx === 0) return 'title';
+
+  // Check for actual valid data
+  const hasChart = hasValidChartData(slide.chart);
+  const hasTable = hasValidTableDataCheck(slide.table);
+  const hasImage = slide.image_url || slide.image_data_url;
+  const hasDiagram = slide.diagram_mermaid && slide.diagram_mermaid.trim().length > 0;
+  const bullets = Array.isArray(slide.bullets) ? slide.bullets.filter(b => b && b.trim()) : [];
+
+  if (hasChart) return 'chart';
+  if (hasTable) return 'table';
+  if (hasImage || hasDiagram) return 'visual';
+  // Use card layout for slides with 2-4 bullet points
+  if (bullets.length >= 2 && bullets.length <= 4) return 'card';
+  return 'content';
+}
+
+function getIconForBullet(text: string, index: number): string {
+  const lowerText = text.toLowerCase();
+  for (const [keyword, icon] of Object.entries(TOPIC_ICONS)) {
+    if (lowerText.includes(keyword.toLowerCase())) return icon;
+  }
+  const defaultIcons = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'];
+  return defaultIcons[index % defaultIcons.length];
 }
 
 function deckToMarkdown(deck: SlideDeck) {
@@ -435,7 +534,34 @@ export function SlideStudio({
     if (!open) return;
     setChartDraft(chartToJson(selectedSlide?.chart || null));
     setImagePromptDraft(selectedSlide?.image_prompt || '');
-  }, [open, selectedSlide?.id, selectedSlide?.chart, selectedSlide?.image_prompt]);
+    // Clear diagram SVG when slide changes - will be re-rendered on demand
+    setSelectedDiagramSvg('');
+  }, [open, selectedSlide?.id, selectedSlide?.chart, selectedSlide?.image_prompt, selectedIndex]);
+
+  // Auto-render Mermaid diagram when slide has diagram_mermaid
+  useEffect(() => {
+    if (!open || !selectedSlide?.diagram_mermaid) return;
+    const code = selectedSlide.diagram_mermaid.trim();
+    if (!code) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { default: mermaid } = await import('mermaid');
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' });
+        const id = `m-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const out = await mermaid.render(id, code);
+        if (!cancelled && out.svg) {
+          setSelectedDiagramSvg(out.svg);
+        }
+      } catch (e) {
+        console.error('Mermaid render error:', e);
+        if (!cancelled) setSelectedDiagramSvg('');
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [open, selectedSlide?.diagram_mermaid, selectedIndex]);
 
   useEffect(() => {
     if (!open) return;
@@ -902,12 +1028,35 @@ export function SlideStudio({
                       aria-disabled={isDisabled}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-[11px] text-muted-foreground">
-                            {idx + 1}
+                        <div className="min-w-0 flex items-center gap-2">
+                          <div
+                            className="w-7 h-7 rounded flex items-center justify-center text-sm flex-shrink-0"
+                            style={{
+                              background: idx === 0 ? PREVIEW_COLORS.primaryLight :
+                                s.chart?.type ? PREVIEW_COLORS.secondaryLight :
+                                hasTableData(s.table) ? '#D1FAE5' :
+                                PREVIEW_COLORS.primaryLight,
+                              border: `1px solid ${idx === 0 ? PREVIEW_COLORS.primaryMid :
+                                s.chart?.type ? PREVIEW_COLORS.secondary :
+                                hasTableData(s.table) ? PREVIEW_COLORS.accent3 :
+                                PREVIEW_COLORS.primaryMid}`
+                            }}
+                          >
+                            {idx === 0 ? '🎯' :
+                             s.chart?.type ? '📊' :
+                             hasTableData(s.table) ? '📋' :
+                             (s.image_url || s.image_data_url || s.diagram_mermaid) ? '🖼️' :
+                             getIconForTitle(s.title || '')}
                           </div>
-                          <div className="text-xs font-medium text-foreground truncate">
-                            {s.title || 'Slide'}
+                          <div className="min-w-0">
+                            <div className="text-[11px] text-muted-foreground flex items-center gap-1">
+                              <span>{idx + 1}</span>
+                              <span className="opacity-50">•</span>
+                              <span className="capitalize">{detectSlideLayout(s, idx)}</span>
+                            </div>
+                            <div className="text-xs font-medium text-foreground truncate">
+                              {s.title || 'Slide'}
+                            </div>
                           </div>
                         </div>
                         <div className="flex items-center gap-0.5 opacity-70">
@@ -964,69 +1113,272 @@ export function SlideStudio({
 	            <div className="flex-1 min-w-0 flex flex-col">
 	              {selectedSlide ? (
 	                <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
-	                {/* Preview */}
-	                <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-	                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-	                    <Pencil className="w-3.5 h-3.5" />
-	                    Preview
-                  </div>
-                  <div className="text-lg font-semibold text-foreground">
-                    {selectedSlide.title || 'Slide'}
-                  </div>
-                  <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-foreground/90">
-                    {(selectedSlide.bullets || []).map((b, i) => (
-                      <li key={i}>{b}</li>
-                    ))}
-                    {(selectedSlide.bullets || []).length === 0 && (
-                      <li className="text-muted-foreground">（内容なし）</li>
-                    )}
-                  </ul>
-                  {getSlideImageSrc(selectedSlide) && (
-                    <div className="mt-3 rounded-lg border border-border bg-background p-2">
-                      <img
-                        src={getSlideImageSrc(selectedSlide)}
-                        alt="Slide visual"
-                        className="max-h-52 w-auto object-contain"
-                      />
-                    </div>
-                  )}
-                  {chartUrl && (
-                    <div className="mt-3 rounded-lg border border-border bg-background p-2">
-                      <img
-                        src={chartUrl}
-                        alt="Slide chart"
-                        className="max-h-52 w-auto object-contain"
-                      />
-                    </div>
-                  )}
-                  {hasTableData(selectedSlide.table) && (
-                    <div className="mt-3 overflow-auto">
-                      <table className="w-full text-xs border border-border">
-                        {selectedSlide.table?.headers && selectedSlide.table.headers.length > 0 && (
-                          <thead className="bg-muted/40">
-                            <tr>
-                              {selectedSlide.table.headers.map((h, i) => (
-                                <th key={i} className="text-left font-medium px-2 py-1 border border-border">
-                                  {h}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                        )}
-                        <tbody>
-                          {(selectedSlide.table?.rows || []).map((row, rIdx) => (
-                            <tr key={rIdx}>
-                              {(row || []).map((cell, cIdx) => (
-                                <td key={cIdx} className="px-2 py-1 border border-border">
-                                  {cell}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+	                {/* Preview - Enhanced Slide Design */}
+	                <div className="rounded-xl border border-border overflow-hidden shadow-lg">
+	                  {/* Slide Preview Container - 16:9 aspect ratio */}
+	                  <div
+	                    className="relative w-full"
+	                    style={{
+	                      aspectRatio: '16/9',
+	                      background: detectSlideLayout(selectedSlide, selectedIndex) === 'title'
+	                        ? PREVIEW_COLORS.primaryLight
+	                        : PREVIEW_COLORS.background
+	                    }}
+	                  >
+	                    {/* Top accent bar */}
+	                    <div
+	                      className="absolute top-0 left-0 right-0 h-1"
+	                      style={{
+	                        background: detectSlideLayout(selectedSlide, selectedIndex) === 'chart'
+	                          ? PREVIEW_COLORS.secondary
+	                          : detectSlideLayout(selectedSlide, selectedIndex) === 'table'
+	                            ? PREVIEW_COLORS.accent3
+	                            : PREVIEW_COLORS.primary
+	                      }}
+	                    />
+
+	                    {/* Title Slide Layout - Title Only, No Bullets */}
+	                    {detectSlideLayout(selectedSlide, selectedIndex) === 'title' ? (
+	                      <div className="h-full flex flex-col items-center justify-center p-6 text-center">
+	                        <div className="text-5xl mb-6">{getIconForTitle(selectedSlide.title || '')}</div>
+	                        <h1 className="text-3xl font-bold mb-4" style={{ color: PREVIEW_COLORS.text }}>
+	                          {selectedSlide.title || 'Presentation Title'}
+	                        </h1>
+	                        <div
+	                          className="mt-4 h-px w-32"
+	                          style={{ background: PREVIEW_COLORS.primaryMid }}
+	                        />
+	                        <div className="mt-4 text-sm" style={{ color: PREVIEW_COLORS.primary }}>
+	                          AI Generated Presentation
+	                        </div>
+	                      </div>
+	                    ) : detectSlideLayout(selectedSlide, selectedIndex) === 'card' ? (
+	                      /* Card Layout - 2x2 Grid */
+	                      <div className="h-full flex flex-col">
+	                        {/* Header bar */}
+	                        <div
+	                          className="h-10 flex items-center px-4 gap-3"
+	                          style={{ background: '#0D4F6F' }}
+	                        >
+	                          <span className="text-xl">{getIconForTitle(selectedSlide.title || '')}</span>
+	                          <h2 className="text-base font-semibold text-white flex-1">
+	                            {selectedSlide.title || 'Slide'}
+	                          </h2>
+	                          <div
+	                            className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold"
+	                            style={{ background: '#FFFFFF', color: '#0D4F6F' }}
+	                          >
+	                            {selectedIndex + 1}
+	                          </div>
+	                        </div>
+	                        {/* Card Grid */}
+	                        <div className="flex-1 p-3 grid grid-cols-2 gap-2">
+	                          {(selectedSlide.bullets || []).slice(0, 4).map((bullet, i) => {
+	                            const accentColor = CARD_ACCENT_COLORS[i % CARD_ACCENT_COLORS.length];
+	                            const colonIdx = bullet.indexOf('：') !== -1 ? bullet.indexOf('：') : bullet.indexOf(':');
+	                            let cardTitle = `ポイント ${i + 1}`;
+	                            let cardDesc = bullet;
+	                            if (colonIdx !== -1 && colonIdx < 30) {
+	                              cardTitle = bullet.slice(0, colonIdx).trim();
+	                              cardDesc = bullet.slice(colonIdx + 1).trim();
+	                            }
+	                            return (
+	                              <div
+	                                key={i}
+	                                className="rounded-lg overflow-hidden flex"
+	                                style={{ background: '#FFFFFF', border: '1px solid #E5E7EB', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}
+	                              >
+	                                {/* Accent bar */}
+	                                <div className="w-1.5 flex-shrink-0" style={{ background: accentColor }} />
+	                                <div className="flex-1 p-2">
+	                                  <div className="flex items-center gap-1.5 mb-1">
+	                                    <span
+	                                      className="w-5 h-5 rounded-full flex items-center justify-center text-xs"
+	                                      style={{ background: `${accentColor}20` }}
+	                                    >
+	                                      {getIconForBullet(bullet, i)}
+	                                    </span>
+	                                    <span className="text-xs font-semibold" style={{ color: PREVIEW_COLORS.text }}>
+	                                      {cardTitle}
+	                                    </span>
+	                                  </div>
+	                                  <p className="text-[10px] leading-relaxed" style={{ color: PREVIEW_COLORS.textLight }}>
+	                                    {cardDesc.length > 80 ? cardDesc.slice(0, 80) + '...' : cardDesc}
+	                                  </p>
+	                                </div>
+	                              </div>
+	                            );
+	                          })}
+	                        </div>
+	                        {/* More indicator */}
+	                        {(selectedSlide.bullets || []).length > 4 && (
+	                          <div className="px-3 pb-2 text-[10px] text-right" style={{ color: PREVIEW_COLORS.textMuted }}>
+	                            + {(selectedSlide.bullets || []).length - 4} more items...
+	                          </div>
+	                        )}
+	                      </div>
+	                    ) : (
+	                      /* Content/Visual/Table/Chart Layouts */
+	                      <div className="h-full p-4 flex flex-col">
+	                        {/* Header with icon and title */}
+	                        <div className="flex items-center gap-3 mb-3">
+	                          <div
+	                            className="w-8 h-8 rounded-lg flex items-center justify-center text-lg"
+	                            style={{ background: PREVIEW_COLORS.primaryLight, border: `1px solid ${PREVIEW_COLORS.primaryMid}` }}
+	                          >
+	                            {detectSlideLayout(selectedSlide, selectedIndex) === 'chart' ? '📊' :
+	                             detectSlideLayout(selectedSlide, selectedIndex) === 'table' ? '📋' :
+	                             detectSlideLayout(selectedSlide, selectedIndex) === 'visual' ? '🖼️' :
+	                             getIconForTitle(selectedSlide.title || '')}
+	                          </div>
+	                          <h2 className="text-lg font-semibold flex-1" style={{ color: PREVIEW_COLORS.text }}>
+	                            {selectedSlide.title || 'Slide'}
+	                          </h2>
+	                          <div
+	                            className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white"
+	                            style={{ background: PREVIEW_COLORS.primary }}
+	                          >
+	                            {selectedIndex + 1}
+	                          </div>
+	                        </div>
+
+	                        {/* Main content area */}
+	                        <div className="flex-1 flex gap-4 min-h-0">
+	                          {/* Left: Bullets */}
+	                          <div className={cn(
+	                            "flex-1 min-w-0",
+	                            (getSlideImageSrc(selectedSlide) || chartUrl || hasTableData(selectedSlide.table) || selectedDiagramSvg)
+	                              ? "max-w-[55%]" : "w-full"
+	                          )}>
+	                            {(selectedSlide.bullets || []).length > 0 ? (
+	                              <ul className="space-y-1.5">
+	                                {(selectedSlide.bullets || []).slice(0, 6).map((b, i) => (
+	                                  <li key={i} className="flex items-start gap-2 text-sm" style={{ color: PREVIEW_COLORS.text }}>
+	                                    <span
+	                                      className="mt-0.5 w-5 h-5 rounded flex items-center justify-center text-xs font-medium flex-shrink-0"
+	                                      style={{ background: PREVIEW_COLORS.primaryLight, color: PREVIEW_COLORS.primary }}
+	                                    >
+	                                      {i + 1}
+	                                    </span>
+	                                    <span className="leading-relaxed">{b}</span>
+	                                  </li>
+	                                ))}
+	                              </ul>
+	                            ) : (
+	                              <div className="text-sm" style={{ color: PREVIEW_COLORS.textMuted }}>
+	                                （内容を追加してください）
+	                              </div>
+	                            )}
+	                          </div>
+
+	                          {/* Right: Visual content */}
+	                          {(getSlideImageSrc(selectedSlide) || chartUrl || hasTableData(selectedSlide.table) || selectedDiagramSvg) && (
+	                            <div
+	                              className="w-[45%] rounded-lg p-3 flex items-center justify-center overflow-hidden"
+	                              style={{
+	                                background: PREVIEW_COLORS.backgroundAlt,
+	                                border: `1px solid ${PREVIEW_COLORS.border}`
+	                              }}
+	                            >
+	                              {selectedDiagramSvg ? (
+	                                <div
+	                                  className="w-full max-h-full overflow-auto"
+	                                  dangerouslySetInnerHTML={{ __html: selectedDiagramSvg }}
+	                                />
+	                              ) : getSlideImageSrc(selectedSlide) ? (
+	                                <img
+	                                  src={getSlideImageSrc(selectedSlide)}
+	                                  alt="Slide visual"
+	                                  className="max-w-full max-h-full object-contain rounded"
+	                                />
+	                              ) : chartUrl ? (
+	                                <img
+	                                  src={chartUrl}
+	                                  alt="Slide chart"
+	                                  className="max-w-full max-h-full object-contain"
+	                                />
+	                              ) : hasTableData(selectedSlide.table) ? (
+	                                <div className="w-full overflow-auto">
+	                                  <table className="w-full text-xs">
+	                                    {selectedSlide.table?.headers && selectedSlide.table.headers.length > 0 && (
+	                                      <thead>
+	                                        <tr>
+	                                          {selectedSlide.table.headers.map((h, i) => (
+	                                            <th
+	                                              key={i}
+	                                              className="text-left font-semibold px-2 py-1.5 text-white"
+	                                              style={{ background: PREVIEW_COLORS.primary }}
+	                                            >
+	                                              {h}
+	                                            </th>
+	                                          ))}
+	                                        </tr>
+	                                      </thead>
+	                                    )}
+	                                    <tbody>
+	                                      {(selectedSlide.table?.rows || []).slice(0, 6).map((row, rIdx) => (
+	                                        <tr key={rIdx}>
+	                                          {(row || []).map((cell, cIdx) => (
+	                                            <td
+	                                              key={cIdx}
+	                                              className="px-2 py-1.5"
+	                                              style={{
+	                                                background: rIdx % 2 === 0 ? PREVIEW_COLORS.backgroundAlt : PREVIEW_COLORS.background,
+	                                                borderBottom: `1px solid ${PREVIEW_COLORS.border}`
+	                                              }}
+	                                            >
+	                                              {cell}
+	                                            </td>
+	                                          ))}
+	                                        </tr>
+	                                      ))}
+	                                    </tbody>
+	                                  </table>
+	                                </div>
+	                              ) : null}
+	                            </div>
+	                          )}
+	                        </div>
+
+	                        {/* Takeaway box */}
+	                        {(selectedSlide.bullets || []).length > 0 && (
+	                          <div
+	                            className="mt-3 px-3 py-2 rounded-lg text-xs"
+	                            style={{
+	                              background: PREVIEW_COLORS.primaryLight,
+	                              border: `1px solid ${PREVIEW_COLORS.primaryMid}`,
+	                              color: PREVIEW_COLORS.primaryDark
+	                            }}
+	                          >
+	                            💡 <strong>Takeaway:</strong> {selectedSlide.title}のポイントを整理し、次のアクションを明確化
+	                          </div>
+	                        )}
+
+	                        {/* Citations footer */}
+	                        {(selectedSlide.citations || []).length > 0 && (
+	                          <div className="mt-2 text-xs" style={{ color: PREVIEW_COLORS.textMuted }}>
+	                            📚 {(selectedSlide.citations || []).slice(0, 3).map(c => c.source_title || 'Source').join(' • ')}
+	                          </div>
+	                        )}
+	                      </div>
+	                    )}
+	                  </div>
+
+	                  {/* Preview label */}
+	                  <div className="px-3 py-2 bg-card border-t border-border flex items-center justify-between">
+	                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+	                      <Pencil className="w-3.5 h-3.5" />
+	                      Preview ({detectSlideLayout(selectedSlide, selectedIndex)} layout)
+	                    </div>
+	                    <button
+	                      type="button"
+	                      onClick={ensureDiagramSvg}
+	                      className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+	                      disabled={busy || exporting !== null || !selectedSlide.diagram_mermaid}
+	                    >
+	                      {selectedSlide.diagram_mermaid ? '🔄 Render Diagram' : ''}
+	                    </button>
+	                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1322,7 +1674,7 @@ export function SlideStudio({
         </div>
       </div>
 
-      {/* Offscreen export slide */}
+      {/* Offscreen export slide - Enhanced Design */}
       <div
         style={{ position: 'fixed', left: -99999, top: 0 }}
         aria-hidden="true"
@@ -1330,99 +1682,238 @@ export function SlideStudio({
         <div
           ref={exportSlideRef}
           style={{ width: 1280, height: 720 }}
-          className="bg-white text-black"
+          className="bg-white text-black relative overflow-hidden"
         >
-          <div className="h-full w-full p-16 flex flex-col">
-            <div className="flex items-start gap-4">
-              <div className="w-12 h-12 rounded-xl bg-black/5 flex items-center justify-center flex-shrink-0">
-                <Sparkles className="w-7 h-7 text-black/70" />
-              </div>
-              <div className="text-4xl font-semibold leading-tight">
-                {slideForExport?.title || deck.title || 'Slide'}
+          {/* Top accent bar */}
+          <div
+            className="absolute top-0 left-0 right-0 h-2"
+            style={{
+              background: exportIndex === 0
+                ? PREVIEW_COLORS.primary
+                : slideForExport?.chart?.type
+                  ? PREVIEW_COLORS.secondary
+                  : hasTableData(slideForExport?.table)
+                    ? PREVIEW_COLORS.accent3
+                    : PREVIEW_COLORS.primary
+            }}
+          />
+
+          {/* Title Slide Layout - Title Only, No Bullets */}
+          {exportIndex === 0 ? (
+            <div
+              className="h-full flex flex-col items-center justify-center p-16 text-center"
+              style={{ background: PREVIEW_COLORS.primaryLight }}
+            >
+              <div className="text-8xl mb-10">{getIconForTitle(slideForExport?.title || deck.title || '')}</div>
+              <h1 className="text-6xl font-bold mb-8" style={{ color: PREVIEW_COLORS.text }}>
+                {slideForExport?.title || deck.title || 'Presentation'}
+              </h1>
+              <div className="mt-8 h-px w-40" style={{ background: PREVIEW_COLORS.primaryMid }} />
+              <div className="mt-6 text-lg" style={{ color: PREVIEW_COLORS.primary }}>
+                AI Generated Presentation
               </div>
             </div>
-            <div className="mt-6 flex-1 grid grid-cols-5 gap-10">
-              <div className={cn('col-span-3', 'text-xl leading-relaxed')}>
-                <ul className="list-disc pl-6 space-y-2">
-                  {(slideForExport?.bullets || []).slice(0, 10).map((b, i) => (
-                    <li key={i}>{b}</li>
-                  ))}
-                </ul>
+          ) : detectSlideLayout(slideForExport!, exportIndex) === 'card' ? (
+            /* Card Layout for Export - 2x2 Grid */
+            <div className="h-full flex flex-col">
+              {/* Header bar */}
+              <div
+                className="h-16 flex items-center px-8 gap-4"
+                style={{ background: '#0D4F6F' }}
+              >
+                <span className="text-3xl">{getIconForTitle(slideForExport?.title || '')}</span>
+                <h2 className="text-2xl font-semibold text-white flex-1">
+                  {slideForExport?.title || 'Slide'}
+                </h2>
+                <div
+                  className="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold"
+                  style={{ background: '#FFFFFF', color: '#0D4F6F' }}
+                >
+                  {exportIndex + 1}
+                </div>
               </div>
-              <div className="col-span-2">
-                {exportDiagramSvg && (
-                  <div className="w-full h-full border border-black/10 rounded-xl p-3 overflow-hidden flex items-center justify-center">
+              {/* Card Grid */}
+              <div className="flex-1 p-6 grid grid-cols-2 gap-4">
+                {(slideForExport?.bullets || []).slice(0, 4).map((bullet, i) => {
+                  const accentColor = CARD_ACCENT_COLORS[i % CARD_ACCENT_COLORS.length];
+                  const colonIdx = bullet.indexOf('：') !== -1 ? bullet.indexOf('：') : bullet.indexOf(':');
+                  let cardTitle = `ポイント ${i + 1}`;
+                  let cardDesc = bullet;
+                  if (colonIdx !== -1 && colonIdx < 30) {
+                    cardTitle = bullet.slice(0, colonIdx).trim();
+                    cardDesc = bullet.slice(colonIdx + 1).trim();
+                  }
+                  return (
                     <div
-                      className="w-full"
-                      dangerouslySetInnerHTML={{ __html: exportDiagramSvg }}
-                    />
-                  </div>
-                )}
-                {showExportImage && (
-                  <div className="w-full h-full border border-black/10 rounded-xl p-3 overflow-hidden flex items-center justify-center">
-                    <img
-                      src={exportImage}
-                      alt="Slide visual"
-                      className="max-h-full w-auto object-contain"
-                    />
-                  </div>
-                )}
-                {showExportChart && (
-                  <div className="w-full h-full border border-black/10 rounded-xl p-3 overflow-hidden flex items-center justify-center">
-                    <img
-                      src={exportChartUrl}
-                      alt="Slide chart"
-                      className="max-h-full w-auto object-contain"
-                    />
-                  </div>
-                )}
-                {showExportTable && (
-                  <div className="w-full h-full border border-black/10 rounded-xl p-4 overflow-auto">
-                    <table className="w-full text-[14px] border border-black/10">
-                      {exportTable?.headers && exportTable.headers.length > 0 && (
-                        <thead>
-                          <tr>
-                            {exportTable.headers.map((h, i) => (
-                              <th key={i} className="text-left font-semibold px-2 py-1 border border-black/10">
-                                {h}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                      )}
-                      <tbody>
-                        {(exportTable?.rows || []).map((row, rIdx) => (
-                          <tr key={rIdx}>
-                            {(row || []).map((cell, cIdx) => (
-                              <td key={cIdx} className="px-2 py-1 border border-black/10">
-                                {cell}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                      key={i}
+                      className="rounded-xl overflow-hidden flex"
+                      style={{ background: '#FFFFFF', border: '2px solid #E5E7EB', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
+                    >
+                      {/* Accent bar */}
+                      <div className="w-3 flex-shrink-0" style={{ background: accentColor }} />
+                      <div className="flex-1 p-5">
+                        <div className="flex items-center gap-3 mb-3">
+                          <span
+                            className="w-10 h-10 rounded-full flex items-center justify-center text-xl"
+                            style={{ background: `${accentColor}20` }}
+                          >
+                            {getIconForBullet(bullet, i)}
+                          </span>
+                          <span className="text-xl font-semibold" style={{ color: PREVIEW_COLORS.text }}>
+                            {cardTitle}
+                          </span>
+                        </div>
+                        <p className="text-base leading-relaxed" style={{ color: PREVIEW_COLORS.textLight }}>
+                          {cardDesc}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
+              {/* More indicator */}
+              {(slideForExport?.bullets || []).length > 4 && (
+                <div className="px-8 pb-4 text-sm text-right" style={{ color: PREVIEW_COLORS.textMuted }}>
+                  + {(slideForExport?.bullets || []).length - 4} more items...
+                </div>
+              )}
             </div>
-            {(slideForExport?.citations || []).length > 0 && (
-              <div className="mt-6 text-[13px] text-black/70">
-                Sources:{' '}
-                {(slideForExport?.citations || []).slice(0, 4).map((c, i) => (
-                  <span key={i}>
-                    {i > 0 ? ' / ' : ''}
-                    {(c.source_title || 'Source') + (c.source_id != null ? `(#${c.source_id})` : '')}
-                  </span>
-                ))}
+          ) : (
+            /* Content Slide Layout */
+            <div className="h-full p-12 flex flex-col">
+              {/* Header */}
+              <div className="flex items-center gap-4 mb-6">
+                <div
+                  className="w-14 h-14 rounded-xl flex items-center justify-center text-2xl"
+                  style={{ background: PREVIEW_COLORS.primaryLight, border: `2px solid ${PREVIEW_COLORS.primaryMid}` }}
+                >
+                  {slideForExport?.chart?.type ? '📊' :
+                   hasTableData(slideForExport?.table) ? '📋' :
+                   (exportDiagramSvg || exportImage) ? '🖼️' :
+                   getIconForTitle(slideForExport?.title || '')}
+                </div>
+                <h2 className="text-4xl font-bold flex-1" style={{ color: PREVIEW_COLORS.text }}>
+                  {slideForExport?.title || 'Slide'}
+                </h2>
+                <div
+                  className="w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold text-white"
+                  style={{ background: PREVIEW_COLORS.primary }}
+                >
+                  {exportIndex + 1}
+                </div>
               </div>
-            )}
-            {exporting && (
-              <div className="mt-2 text-[12px] text-black/50">
-                Exporting {exporting.toUpperCase()}… ({exportIndex + 1}/{deck.slides.length})
+
+              {/* Main content */}
+              <div className="flex-1 flex gap-8 min-h-0">
+                {/* Left: Bullets */}
+                <div className={cn(
+                  "flex-1",
+                  (exportDiagramSvg || showExportImage || showExportChart || showExportTable) ? "max-w-[55%]" : "w-full"
+                )}>
+                  <ul className="space-y-3">
+                    {(slideForExport?.bullets || []).slice(0, 8).map((b, i) => (
+                      <li key={i} className="flex items-start gap-3 text-xl" style={{ color: PREVIEW_COLORS.text }}>
+                        <span
+                          className="mt-1 w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold flex-shrink-0"
+                          style={{ background: PREVIEW_COLORS.primaryLight, color: PREVIEW_COLORS.primary }}
+                        >
+                          {i + 1}
+                        </span>
+                        <span className="leading-relaxed">{b}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Right: Visual content */}
+                {(exportDiagramSvg || showExportImage || showExportChart || showExportTable) && (
+                  <div
+                    className="w-[45%] rounded-2xl p-4 flex items-center justify-center overflow-hidden"
+                    style={{ background: PREVIEW_COLORS.backgroundAlt, border: `2px solid ${PREVIEW_COLORS.border}` }}
+                  >
+                    {exportDiagramSvg ? (
+                      <div
+                        className="w-full max-h-full overflow-hidden"
+                        dangerouslySetInnerHTML={{ __html: exportDiagramSvg }}
+                      />
+                    ) : showExportImage ? (
+                      <img
+                        src={exportImage}
+                        alt="Slide visual"
+                        className="max-w-full max-h-full object-contain rounded-lg"
+                      />
+                    ) : showExportChart ? (
+                      <img
+                        src={exportChartUrl}
+                        alt="Slide chart"
+                        className="max-w-full max-h-full object-contain"
+                      />
+                    ) : showExportTable ? (
+                      <div className="w-full overflow-auto">
+                        <table className="w-full text-base">
+                          {exportTable?.headers && exportTable.headers.length > 0 && (
+                            <thead>
+                              <tr>
+                                {exportTable.headers.map((h, i) => (
+                                  <th
+                                    key={i}
+                                    className="text-left font-bold px-4 py-3 text-white"
+                                    style={{ background: PREVIEW_COLORS.primary }}
+                                  >
+                                    {h}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                          )}
+                          <tbody>
+                            {(exportTable?.rows || []).map((row, rIdx) => (
+                              <tr key={rIdx}>
+                                {(row || []).map((cell, cIdx) => (
+                                  <td
+                                    key={cIdx}
+                                    className="px-4 py-2"
+                                    style={{
+                                      background: rIdx % 2 === 0 ? PREVIEW_COLORS.backgroundAlt : PREVIEW_COLORS.background,
+                                      borderBottom: `1px solid ${PREVIEW_COLORS.border}`
+                                    }}
+                                  >
+                                    {cell}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+
+              {/* Takeaway box */}
+              {(slideForExport?.bullets || []).length > 0 && (
+                <div
+                  className="mt-4 px-6 py-3 rounded-xl text-base"
+                  style={{ background: PREVIEW_COLORS.primaryLight, border: `1px solid ${PREVIEW_COLORS.primaryMid}`, color: PREVIEW_COLORS.primaryDark }}
+                >
+                  💡 <strong>Takeaway:</strong> {slideForExport?.title}のポイントを整理し、次のアクションを明確化
+                </div>
+              )}
+
+              {/* Citations footer */}
+              {(slideForExport?.citations || []).length > 0 && (
+                <div className="mt-3 text-sm" style={{ color: PREVIEW_COLORS.textMuted }}>
+                  📚 Sources: {(slideForExport?.citations || []).slice(0, 4).map((c, i) => (
+                    <span key={i}>
+                      {i > 0 ? ' • ' : ''}
+                      {c.source_title || 'Source'}{c.source_id != null ? ` (#${c.source_id})` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

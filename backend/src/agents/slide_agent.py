@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-SLIDE_SYSTEM_PROMPT = """あなたは社内文書の内容に基づいて資料（スライド）を作るアシスタントです。
+SLIDE_SYSTEM_PROMPT = """あなたは社内文書の内容に基づいて、プロフェッショナルな資料（スライド）を作るアシスタントです。
 与えられた「参考文書（検索結果）」の内容のみに基づき、ユーザーの質問に対するスライド資料を作成/編集してください。
 
 重要なルール:
@@ -28,6 +28,20 @@ SLIDE_SYSTEM_PROMPT = """あなたは社内文書の内容に基づいて資料�
 3. 各スライドは要点だけ（箇条書き中心、1スライド3〜6項目）
 4. 可能な限り、各スライドに根拠（citations）を付ける
 5. citations の quote は短い抜粋（120文字以内）
+
+スライドレイアウトのガイドライン:
+- 最初のスライドは概要・タイトルスライドにする（layout: "title"）
+- 数値比較やデータがある場合は chart を使用する（layout: "chart"）
+- 一覧や比較表がある場合は table を使用する（layout: "table"）
+- プロセスやワークフローの説明には diagram_mermaid を使用する
+- 図解が重要な場合は layout: "visual" を指定する
+- 通常の説明は layout: "content" （デフォルト）
+
+視覚要素の選び方:
+- diagram_mermaid: プロセスフロー、階層構造、シーケンスに最適
+- table: 項目比較、仕様一覧、チェックリストに最適
+- chart: 数値データ、トレンド、割合比較に最適（bar/line/pie）
+- image_prompt: 概念図、アイコン風イラストが必要な場合
 """
 
 
@@ -105,7 +119,7 @@ def _build_fallback_slides(
     seed_points: list[str],
     max_slides: int,
 ) -> list[dict[str, Any]]:
-    target = max(3, min(max_slides, 6))
+    target = max(3, min(max_slides, 20))  # Allow up to 20 slides
     themes = [
         "概要",
         "主要ポイント",
@@ -113,6 +127,20 @@ def _build_fallback_slides(
         "比較・整理",
         "実行計画",
         "まとめ",
+        "詳細分析",
+        "背景・経緯",
+        "課題と対策",
+        "今後の展望",
+        "補足情報",
+        "参考データ",
+        "Q&A",
+        "アクションアイテム",
+        "スケジュール",
+        "リソース",
+        "コスト分析",
+        "リスク管理",
+        "成功指標",
+        "結論",
     ]
     slides: list[dict[str, Any]] = []
     cursor = 0
@@ -138,8 +166,19 @@ def _build_fallback_slides(
                 ][: max(0, 3 - len(bullets))]
             )
 
+        # Determine appropriate layout based on theme
+        if i == 0:
+            layout = "title"
+        elif theme in ("比較・整理",):
+            layout = "table"
+        elif theme in ("ワークフロー",):
+            layout = "visual"
+        else:
+            layout = "content"
+
         slide: dict[str, Any] = {
             "title": _compact_text(title, 50),
+            "layout": layout,
             "bullets": bullets[:8],
             "diagram_mermaid": "",
             "table": None,
@@ -201,35 +240,36 @@ def format_slide_sources_for_prompt(
 
 SLIDE_DECK_JSON_SCHEMA = {
     "title": "string",
-    "summary": "string (optional)",
+    "summary": "string (optional, 1-2文で資料全体の概要)",
     "slides": [
         {
             "title": "string",
-            "bullets": ["string"],
-            "diagram_mermaid": "string (optional, Mermaid code)",
+            "layout": "title | content | visual | table | chart (optional, auto-detected if omitted)",
+            "bullets": ["string (3-6 items, short and concise)"],
+            "diagram_mermaid": "string (optional, Mermaid flowchart/sequence/class diagram code)",
             "table": {
-                "headers": ["string"],
-                "rows": [["string"]],
+                "headers": ["string (column headers)"],
+                "rows": [["string (cell values)"]],
             },
-            "image_url": "string (optional, only if provided in sources)",
-            "image_prompt": "string (optional, abstract visual prompt)",
+            "image_url": "string (optional, only if explicitly provided in sources)",
+            "image_prompt": "string (optional, abstract icon/illustration description)",
             "chart": {
                 "type": "bar | line | pie",
-                "title": "string (optional)",
-                "labels": ["string"],
+                "title": "string (optional, chart title)",
+                "labels": ["string (x-axis labels)"],
                 "datasets": [
                     {
-                        "label": "string (optional)",
-                        "data": ["number"],
+                        "label": "string (series name)",
+                        "data": ["number (values)"],
                     }
                 ],
             },
-            "speaker_notes": "string (optional)",
+            "speaker_notes": "string (optional, presenter notes)",
             "citations": [
                 {
                     "source_id": "number (matches sources.source_id)",
                     "source_title": "string (document name)",
-                    "quote": "string (<= 120 chars)",
+                    "quote": "string (<= 120 chars, exact excerpt)",
                 }
             ],
         }
@@ -257,17 +297,34 @@ def build_generate_slide_prompt(
 
 ## 出力要件
 - 最大 {max_slides} 枚
-- 1枚あたり 3〜6 bullet
-- bullets は空配列にしない（必ず3項目以上）
-- bullets は短く（1行で読める）
-- 各スライドに最低1つの視覚要素を入れる（diagram_mermaid / table / chart / image_prompt のいずれか）
-- 可能なら diagram_mermaid に Mermaid 記法の簡単な図（フローチャート等）を入れる
-- 比較や一覧に向く場合は table（headers/rows）を入れる
-- image_url は参考文書に明記されている場合のみ入れる（推測でURLを作らない）
-- グラフが効果的なら chart を入れる（type/labels/datasets）。数値は参考文書にある場合のみ使う
-- 文書に明記がない場合は、例示（「例」「イメージ」）として抽象的な図・表・フローや image_prompt（アイコン風イラスト指示）を作ってもよいが、事実と誤解される具体的数値や固有名は使わない
-- citations は可能な限り付ける（source_id, source_title, quote）
-- quote は参考文書 text からの短い抜粋（120文字以内）
+- 1枚あたり 3〜6 bullet（空配列にしない）
+- bullets は短く簡潔に（1行で読める長さ）
+
+## レイアウト選択ガイド
+各スライドに適切な layout を指定してください：
+- "title": 最初のスライド（タイトル・概要）
+- "content": 通常の説明スライド（デフォルト）
+- "visual": 図解・フローチャートが主役のスライド
+- "table": 比較表・一覧が主役のスライド
+- "chart": グラフ・データ可視化が主役のスライド
+
+## 視覚要素の選び方
+各スライドに最低1つの視覚要素を入れる：
+- diagram_mermaid: プロセスフロー、階層、シーケンスに最適
+  - 例: flowchart TD, sequenceDiagram, classDiagram
+- table: 項目比較、仕様一覧、チェックリストに最適
+  - headers と rows を両方指定
+- chart: 数値データ、トレンド、割合に最適
+  - type: bar（棒）, line（折れ線）, pie（円）
+  - labels と datasets を指定
+- image_prompt: 概念的なアイコン・イラストが必要な場合
+  - 抽象的な表現で、具体的な数値や固有名は避ける
+
+## 重要なルール
+- image_url は参考文書に明記されている場合のみ使用
+- chart の数値は参考文書に根拠がある場合のみ使用
+- 文書にない情報は推測しない
+- citations を可能な限り付ける（quote は120文字以内）
 
 ## 出力形式（JSONのみ）
 {json.dumps(SLIDE_DECK_JSON_SCHEMA, ensure_ascii=False)}
@@ -365,6 +422,14 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
         image_prompt = s.get("image_prompt") or s.get("visual_prompt") or s.get("image_description")
         if image_prompt is not None:
             image_prompt = str(image_prompt).strip()
+
+        # Layout field for slide type selection
+        layout_raw = s.get("layout")
+        layout = None
+        if layout_raw is not None:
+            layout_str = str(layout_raw).strip().lower()
+            if layout_str in {"title", "content", "visual", "table", "chart", "comparison"}:
+                layout = layout_str
 
         chart_raw = s.get("chart") or s.get("chart_data") or s.get("chart_json")
         if isinstance(chart_raw, str):
@@ -466,6 +531,7 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
         slides_out.append(
             {
                 "title": stitle,
+                "layout": layout,
                 "bullets": bullets_norm[:8],
                 "diagram_mermaid": diagram_mermaid or "",
                 "table": table_out,
