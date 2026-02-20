@@ -36,6 +36,11 @@ IMAGE_GEN_MAX_PER_DECK = int(os.getenv("IMAGE_GEN_MAX_PER_DECK", "6"))
 IMAGE_GEN_TIMEOUT = int(os.getenv("IMAGE_GEN_TIMEOUT", "60"))
 SLIDE_GENERATION_TIMEOUT = float(os.getenv("SLIDE_GENERATION_TIMEOUT", "60"))
 
+# Slide HTML generation (dedicated LLM, e.g. Grok / xAI)
+SLIDE_HTML_API_KEY = os.getenv("SLIDE_HTML_API_KEY", "")
+SLIDE_HTML_BASE_URL = os.getenv("SLIDE_HTML_BASE_URL", "https://api.x.ai/v1")
+SLIDE_HTML_MODEL = os.getenv("SLIDE_HTML_MODEL", "grok-3-mini")
+
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -68,6 +73,15 @@ from src.agents.slide_agent import (
     normalize_slide_deck,
     retrieve_sources_for_slides,
 )
+from src.agents.visual_slide_agent import (
+    STYLE_PRESETS,
+    DEFAULT_PRESET,
+    build_outline_from_answer,
+    build_slide_image_prompt,
+    SLIDE_HTML_SYSTEM_PROMPT,
+    build_slide_html_prompt,
+    extract_html_from_response,
+)
 from src.llm.ai_client import AIClient
 from src.llm.config import get_llm_config, LLMConfig, AIProvider
 
@@ -80,6 +94,7 @@ ai_client: Optional[AIClient] = None
 llm_config: Optional[LLMConfig] = None
 db_service: Optional[DatabaseService] = None
 ocr_client: Optional[AIClient] = None  # Dedicated client for OCR when AI_OCR_BASE_URL is set
+slide_html_client: Optional[AIClient] = None  # Dedicated client for slide HTML generation (e.g. Grok)
 
 # Alias for backwards compatibility
 ollama_client: Optional[AIClient] = None
@@ -112,7 +127,7 @@ def _upsert_env_value(env_path: Path, key: str, value: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
-    global ai_client, ollama_client, llm_config, db_service, ocr_client
+    global ai_client, ollama_client, llm_config, db_service, ocr_client, slide_html_client
 
     import time
 
@@ -155,6 +170,20 @@ async def lifespan(app: FastAPI):
             logger.info(f"OCR enabled (dedicated client): base_url={ocr_base_url}, model={ocr_model}")
         else:
             ocr_client = None
+
+        # Slide HTML client (Grok / xAI) — separate from main AI client
+        if SLIDE_HTML_API_KEY:
+            slide_html_client = AIClient(
+                base_url=SLIDE_HTML_BASE_URL,
+                model=SLIDE_HTML_MODEL,
+                embedding_model="",
+                timeout=60.0,
+                max_retries=1,
+                provider=AIProvider.OPENAI,
+                api_key=SLIDE_HTML_API_KEY,
+                max_concurrent_embeddings=1,
+            )
+            logger.info(f"Slide HTML client initialized: model={SLIDE_HTML_MODEL}, base_url={SLIDE_HTML_BASE_URL}")
 
         # Check health on startup
         health = await ai_client.health_check()
@@ -213,6 +242,9 @@ async def lifespan(app: FastAPI):
     if ocr_client and ocr_client is not ai_client:
         await ocr_client.close()
         logger.info("OCR client closed")
+    if slide_html_client:
+        await slide_html_client.close()
+        logger.info("Slide HTML client closed")
 
     if db_service:
         db_service.close()
@@ -295,6 +327,26 @@ class SlideDeckRefineRequest(BaseModel):
 
 class SlideImageRequest(BaseModel):
     prompt: str
+
+
+class VisualSlideOutlineRequest(BaseModel):
+    question: str
+    answer: Optional[str] = None
+    mode: Optional[str] = "standard"
+    max_slides: Optional[int] = 6
+    style_preset: Optional[str] = None
+
+
+class VisualSlideGenerateRequest(BaseModel):
+    question: str
+    outline: dict
+    style_preset: Optional[str] = None
+
+
+class VisualSlideRenderHtmlRequest(BaseModel):
+    slide: dict
+    style_preset: Optional[str] = None
+    deck_title: str = "Slides"
 
 
 class FormatRequest(BaseModel):
@@ -1727,7 +1779,7 @@ def _build_image_prompt(slide: dict) -> str:
     return _compact_prompt(f"{base}. {style}")
 
 
-async def generate_image_data_url(prompt: str) -> Optional[str]:
+async def generate_image_data_url(prompt: str, size: str | None = None) -> Optional[str]:
     if not IMAGE_GEN_ENABLED:
         return None
     if IMAGE_GEN_PROVIDER != "openai":
@@ -1740,7 +1792,7 @@ async def generate_image_data_url(prompt: str) -> Optional[str]:
     payload = {
         "model": IMAGE_GEN_MODEL,
         "prompt": prompt,
-        "size": IMAGE_GEN_SIZE,
+        "size": size or IMAGE_GEN_SIZE,
         "response_format": "b64_json",
     }
     if IMAGE_GEN_QUALITY:
@@ -1976,6 +2028,192 @@ async def generate_slide_image(request: SlideImageRequest):
     if not data_url:
         raise HTTPException(status_code=500, detail="Image generation failed")
     return {"data_url": data_url}
+
+
+# ============================================================
+# Visual Slide Endpoints (image-based slide generation)
+# ============================================================
+
+@app.get("/pipeline/slides/visual/presets")
+async def get_visual_slide_presets():
+    """Return available style presets for visual slide generation."""
+    presets = {
+        key: {"label": v["label"], "description": v["description"]}
+        for key, v in STYLE_PRESETS.items()
+    }
+    return {"presets": presets, "default": DEFAULT_PRESET}
+
+
+@app.post("/pipeline/slides/visual/outline")
+async def generate_visual_slide_outline(request: VisualSlideOutlineRequest):
+    """
+    Phase 1: Build slide outline from answer text (no LLM call — instant).
+    Parses the answer's headings/paragraphs into a structured outline.
+    """
+    import time
+
+    started = time.time()
+    question = request.question
+    max_slides = max(3, min(int(request.max_slides or 6), 12))
+    style_preset = request.style_preset or DEFAULT_PRESET
+    if style_preset not in STYLE_PRESETS:
+        style_preset = DEFAULT_PRESET
+
+    try:
+        outline = build_outline_from_answer(
+            question=question,
+            answer=request.answer,
+            max_slides=max_slides,
+        )
+
+        presets_summary = {
+            key: {"label": v["label"], "description": v["description"]}
+            for key, v in STYLE_PRESETS.items()
+        }
+
+        return {
+            "outline": outline,
+            "style_preset": style_preset,
+            "sources": [],
+            "presets": presets_summary,
+            "generation_time_seconds": round(time.time() - started, 2),
+        }
+
+    except Exception as e:
+        logger.error(f"[VISUAL_SLIDES] Outline failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/visual/renderhtml")
+async def render_slide_html(request: VisualSlideRenderHtmlRequest):
+    """
+    Generate styled HTML for a single slide using the dedicated Slide HTML LLM (e.g. Grok).
+    Falls back to main ai_client if slide_html_client is not configured.
+    """
+    client = slide_html_client or ai_client
+    if not client:
+        raise HTTPException(status_code=503, detail="LLM not available")
+
+    style_preset = request.style_preset or DEFAULT_PRESET
+    if style_preset not in STYLE_PRESETS:
+        style_preset = DEFAULT_PRESET
+
+    prompt = build_slide_html_prompt(
+        slide=request.slide,
+        style_preset=style_preset,
+        deck_title=request.deck_title,
+    )
+
+    try:
+        result = await client.generate(
+            prompt=prompt,
+            system=SLIDE_HTML_SYSTEM_PROMPT,
+            temperature=0.3,
+        )
+        html = extract_html_from_response(result.text)
+        return {"html": html}
+    except Exception as e:
+        logger.error(f"[VISUAL_SLIDES] render-html failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/visual/generate")
+async def generate_visual_slides(request: VisualSlideGenerateRequest):
+    """
+    Phase 2: Generate slide images from outline via SSE streaming.
+    Uses asyncio.Semaphore(3) for parallel image generation.
+    """
+    import time
+    import json as json_mod
+
+    if not IMAGE_GEN_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Image generation is disabled (IMAGE_GEN_ENABLED=false)",
+        )
+
+    outline = request.outline
+    slides = outline.get("slides") or []
+    if not slides:
+        raise HTTPException(status_code=400, detail="Outline has no slides")
+
+    deck_title = str(outline.get("title") or request.question).strip()
+    style_preset = request.style_preset or DEFAULT_PRESET
+    if style_preset not in STYLE_PRESETS:
+        style_preset = DEFAULT_PRESET
+
+    total = len(slides)
+    semaphore = asyncio.Semaphore(3)
+    results: dict[int, dict[str, Any]] = {}
+
+    async def generate_one(idx: int, slide: dict) -> None:
+        async with semaphore:
+            prompt = build_slide_image_prompt(
+                slide=slide,
+                style_preset=style_preset,
+                deck_title=deck_title,
+            )
+            try:
+                data_url = await generate_image_data_url(prompt, size="1792x1024")
+                if data_url:
+                    results[idx] = {
+                        "type": "slide_complete",
+                        "slide_index": idx,
+                        "total": total,
+                        "image_data_url": data_url,
+                        "title": slide.get("title", f"Slide {idx + 1}"),
+                    }
+                else:
+                    results[idx] = {
+                        "type": "error",
+                        "slide_index": idx,
+                        "error": "Image generation returned empty result",
+                    }
+            except Exception as e:
+                logger.warning(f"[VISUAL_SLIDES] Slide {idx} image failed: {e}")
+                results[idx] = {
+                    "type": "error",
+                    "slide_index": idx,
+                    "error": str(e),
+                }
+
+    async def event_stream():
+        # Start event
+        yield f"data: {json_mod.dumps({'type': 'start', 'total': total, 'style': style_preset})}\n\n"
+
+        # Launch all tasks
+        tasks = [
+            asyncio.create_task(generate_one(i, slide))
+            for i, slide in enumerate(slides)
+        ]
+
+        # Poll for completed results and stream them as they finish
+        completed_sent: set[int] = set()
+        while len(completed_sent) < total:
+            await asyncio.sleep(0.5)
+            for idx in range(total):
+                if idx in results and idx not in completed_sent:
+                    yield f"data: {json_mod.dumps(results[idx])}\n\n"
+                    completed_sent.add(idx)
+
+        # Ensure all tasks are done
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Done event
+        completed_count = sum(
+            1 for r in results.values() if r.get("type") == "slide_complete"
+        )
+        yield f"data: {json_mod.dumps({'type': 'done', 'total': total, 'completed_count': completed_count})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 if __name__ == "__main__":

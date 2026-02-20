@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
-import { QueryResult } from '@/lib/api';
+import { QueryResult, API_BASE } from '@/lib/api';
 import { useUpload } from '@/context/UploadContext';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
@@ -30,6 +30,7 @@ import {
 import { Source } from '@/components/ai-elements/sources';
 import { Suggestions, Suggestion } from '@/components/ai-elements/suggestion';
 import { SlideStudio, type SlideDeck } from '@/components/ai-elements/slide-studio';
+import { VisualSlideViewer } from '@/components/ai-elements/visual-slide-viewer';
 
 import {
   MessageCircle,
@@ -43,9 +44,8 @@ import {
   FileText,
   Presentation,
   ChevronDown,
+  Image,
 } from 'lucide-react';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 // Search mode definitions
 type SearchMode = 'fast' | 'standard' | 'accurate';
@@ -155,6 +155,9 @@ export default function QueryPage() {
   const [slideBusyMessageId, setSlideBusyMessageId] = useState<string | null>(null);
   const [slideError, setSlideError] = useState<string | null>(null);
   const [slideErrorMessageId, setSlideErrorMessageId] = useState<string | null>(null);
+
+  // Visual slide viewer state
+  const [visualSlideMessageId, setVisualSlideMessageId] = useState<string | null>(null);
 
   const { files, isUploading, completedCount, totalCount } = useUpload();
   const hasUploads = files.length > 0;
@@ -570,6 +573,15 @@ export default function QueryPage() {
                               )}
                               スライド
                             </button>
+                            <button
+                              onClick={() => setVisualSlideMessageId(message.id)}
+                              disabled={isLoading}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full border border-amber-300/50 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="AIで画像スライドを生成"
+                            >
+                              <Image className="w-3 h-3" />
+                              ビジュアル
+                            </button>
                             {slideError && slideErrorMessageId === message.id && (
                               <span className="text-[11px] text-destructive">{slideError}</span>
                             )}
@@ -684,6 +696,19 @@ export default function QueryPage() {
           onRequestRefine={(instruction) => handleRefineSlides(instruction)}
         />
       )}
+
+      {visualSlideMessageId && (() => {
+        const msg = messages.find((m) => m.id === visualSlideMessageId);
+        return (
+          <VisualSlideViewer
+            open={true}
+            question={msg?.questionText || msg?.result?.question || ''}
+            answer={msg?.content}
+            mode={(msg?.result?.mode as string | undefined) || searchMode}
+            onClose={() => setVisualSlideMessageId(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
