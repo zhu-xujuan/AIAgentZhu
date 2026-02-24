@@ -8,257 +8,116 @@ import {
   ChevronRight,
   Download,
   Edit3,
-  Image as ImageIcon,
+  FileCode,
   Loader2,
-  Palette,
   RefreshCw,
   Sparkles,
   X,
 } from 'lucide-react';
 
-
 // ============================================================
 // Types
 // ============================================================
 
-type StylePreset = {
-  label: string;
-  description: string;
-};
-
-type OutlineSlide = {
-  slide_number: number;
+type SlideSection = {
   title: string;
   type: 'cover' | 'content' | 'back-cover';
-  key_message: string;
-  visual_description: string;
-  layout: string;
-  text_elements: string[];
-};
-
-type Outline = {
-  title: string;
-  slides: OutlineSlide[];
+  plan_text: string;
 };
 
 type GeneratedSlide = {
   index: number;
   title: string;
   html: string;
-  outlineSlide: OutlineSlide;
+  type: string;
   fallback?: boolean;
 };
 
 type Phase =
-  | 'outline_loading'
-  | 'outline_ready'
+  | 'planning'
+  | 'plan_ready'
   | 'generating'
   | 'done'
   | 'error';
-
-// ============================================================
-// Preset pill colors
-// ============================================================
-
-const PRESET_COLORS: Record<string, { bg: string; border: string; text: string; activeBg: string }> = {
-  blueprint: { bg: 'bg-sky-50', border: 'border-sky-200', text: 'text-sky-700', activeBg: 'bg-sky-100' },
-  corporate: { bg: 'bg-slate-50', border: 'border-slate-200', text: 'text-slate-700', activeBg: 'bg-slate-100' },
-  minimal: { bg: 'bg-gray-50', border: 'border-gray-200', text: 'text-gray-700', activeBg: 'bg-gray-100' },
-  'sketch-notes': { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700', activeBg: 'bg-amber-100' },
-  'dark-atmospheric': { bg: 'bg-zinc-100', border: 'border-zinc-300', text: 'text-zinc-700', activeBg: 'bg-zinc-200' },
-  'bold-editorial': { bg: 'bg-fuchsia-50', border: 'border-fuchsia-200', text: 'text-fuchsia-700', activeBg: 'bg-fuchsia-100' },
-  'pptx-cards': { bg: 'bg-indigo-50', border: 'border-indigo-200', text: 'text-indigo-700', activeBg: 'bg-indigo-100' },
-};
-
-const DEFAULT_PRESETS: Record<string, StylePreset> = {
-  blueprint:          { label: 'Blueprint', description: 'ダークブルー技術的スタイル' },
-  corporate:          { label: 'Corporate', description: 'クリーンなビジネススタイル' },
-  minimal:            { label: 'Minimal', description: 'シンプルなグレースタイル' },
-  'sketch-notes':     { label: 'Sketch Notes', description: '手書き風の温かいスタイル' },
-  'dark-atmospheric': { label: 'Dark', description: 'ダークモードスタイル' },
-  'bold-editorial':   { label: 'Bold', description: '大胆なカラフルスタイル' },
-  'pptx-cards':       { label: 'PPTX Native', description: 'カード型・即時生成（LLM不要）' },
-};
 
 // Slide dimensions (px)
 const SLIDE_W = 1280;
 const SLIDE_H = 720;
 
 // ============================================================
-// PPTX Native HTML generation (local, no LLM)
+// Client-side MD parser
 // ============================================================
 
-const PPTX_COLORS = {
-  primary: '#4F46E5',
-  primaryLight: '#EEF2FF',
-  primaryDark: '#3730A3',
-  text: '#111827',
-  textLight: '#6B7280',
-  textMuted: '#9CA3AF',
-  bg: '#FFFFFF',
-  bgAlt: '#F9FAFB',
-  border: '#E5E7EB',
-  tableHeader: '#4F46E5',
-  tableHeaderText: '#FFFFFF',
-};
+function parsePlanMd(md: string): { title: string; slides: SlideSection[] } {
+  const lines = md.split('\n');
+  let title = 'Slides';
+  const slides: SlideSection[] = [];
+  let current: SlideSection | null = null;
 
-const CARD_ACCENTS = ['#F4A261', '#6BB8C9', '#10B981', '#E91E63', '#8B5CF6', '#F59E0B'];
+  for (const line of lines) {
+    const stripped = line.trim();
 
-const TOPIC_ICONS: Record<string, string> = {
-  '概要': '📋', '紹介': '👋', 'まとめ': '✅', '結論': '🎯',
-  '比較': '⚖️', '分析': '📊', 'データ': '📈', 'ワークフロー': '🔄',
-  'プロセス': '⚙️', '計画': '📅', '課題': '⚠️', '問題': '❗',
-  '解決': '💡', '提案': '💡', 'ポイント': '📌', '要点': '📌',
-  '技術': '🔧', 'システム': '🖥️', 'セキュリティ': '🔒', '品質': '✨',
-  '目標': '🎯', 'overview': '📋', 'summary': '✅', 'conclusion': '🎯',
-};
+    // Deck title: # ...
+    if (/^#\s+/.test(stripped) && !/^##/.test(stripped)) {
+      title = stripped.replace(/^#\s+/, '').trim();
+      continue;
+    }
 
-function getTopicIcon(title: string): string {
-  for (const [kw, icon] of Object.entries(TOPIC_ICONS)) {
-    if (title.toLowerCase().includes(kw.toLowerCase())) return icon;
-  }
-  return '📄';
-}
+    // Slide header: ## スライドN: ...
+    const slideMatch = stripped.match(/^##\s+スライド\d+[:\s：]\s*(.+)/);
+    if (slideMatch) {
+      if (current) slides.push(current);
+      current = { title: slideMatch[1].trim(), type: 'content', plan_text: '' };
+      continue;
+    }
 
-function toTakeaway(msg: string, maxLen = 60): string {
-  const t = (msg || '').trim();
-  return t.length > maxLen ? t.slice(0, maxLen - 1) + '…' : t;
-}
+    // Fallback: any ## header
+    if (/^##\s+/.test(stripped) && !slideMatch) {
+      if (current) slides.push(current);
+      current = { title: stripped.replace(/^##\s+/, '').trim(), type: 'content', plan_text: '' };
+      continue;
+    }
 
-type PptxLayout = 'cover' | 'cards' | 'content-flow';
-
-function detectPptxLayout(slide: OutlineSlide): PptxLayout {
-  if (slide.type === 'cover' || slide.type === 'back-cover') return 'cover';
-  const n = (slide.text_elements || []).length;
-  if (n >= 2 && n <= 4) return 'cards';
-  return 'content-flow';
-}
-
-function generatePptxNativeHtml(
-  slide: OutlineSlide,
-  deckTitle: string,
-  slideIndex: number,
-  totalSlides: number,
-): string {
-  const layout = detectPptxLayout(slide);
-  const icon = getTopicIcon(slide.title);
-  const bullets = slide.text_elements || [];
-  const C = PPTX_COLORS;
-
-  const baseStyle = `width:${SLIDE_W}px;height:${SLIDE_H}px;overflow:hidden;font-family:'Segoe UI','Hiragino Sans',sans-serif;position:relative;`;
-
-  // Footer bar
-  const footer = `<div style="position:absolute;bottom:0;left:0;right:0;height:36px;background:${C.bgAlt};border-top:1px solid ${C.border};display:flex;align-items:center;justify-content:space-between;padding:0 32px;">
-    <span style="font-size:11px;color:${C.textMuted};">${deckTitle}</span>
-    <span style="font-size:11px;color:${C.textMuted};">${slideIndex + 1} / ${totalSlides}</span>
-  </div>`;
-
-  // ---------- Cover / Back-cover ----------
-  if (layout === 'cover') {
-    const isCover = slide.type === 'cover';
-    const subtitle = isCover
-      ? toTakeaway(slide.key_message, 80)
-      : 'ご清聴ありがとうございました';
-    const mainTitle = isCover ? deckTitle : slide.title;
-
-    return `<div style="${baseStyle}background:linear-gradient(135deg,${C.primary} 0%,${C.primaryDark} 100%);">
-      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;width:80%;">
-        <div style="font-size:56px;margin-bottom:16px;">${icon}</div>
-        <h1 data-editable="true" style="font-size:42px;font-weight:700;color:#fff;margin:0 0 20px 0;line-height:1.3;">${mainTitle}</h1>
-        <h2 data-editable="true" style="font-size:20px;font-weight:400;color:rgba(255,255,255,0.85);margin:0;line-height:1.5;">${subtitle}</h2>
-      </div>
-      <div style="position:absolute;top:32px;left:32px;width:64px;height:4px;background:rgba(255,255,255,0.3);border-radius:2px;"></div>
-      <div style="position:absolute;bottom:32px;right:32px;width:64px;height:4px;background:rgba(255,255,255,0.3);border-radius:2px;"></div>
-    </div>`;
+    if (current) {
+      current.plan_text += line + '\n';
+      const typeMatch = stripped.match(/^-\s*タイプ[:\s：]\s*(.+)/);
+      if (typeMatch) {
+        const rawType = typeMatch[1].trim().toLowerCase();
+        if (rawType === 'cover' || rawType === 'back-cover') {
+          current.type = rawType;
+        } else if (rawType.includes('back') && rawType.includes('cover')) {
+          current.type = 'back-cover';
+        } else if (rawType.includes('cover')) {
+          current.type = 'cover';
+        }
+      }
+    }
   }
 
-  // ---------- Cards layout (2-4 bullets) ----------
-  if (layout === 'cards') {
-    const cols = bullets.length <= 2 ? 2 : bullets.length;
-    const colWidth = Math.floor((SLIDE_W - 80 - (cols - 1) * 20) / cols);
-
-    const cards = bullets.map((b, i) => {
-      const accent = CARD_ACCENTS[i % CARD_ACCENTS.length];
-      return `<div style="width:${colWidth}px;background:${C.bg};border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);overflow:hidden;display:flex;flex-direction:column;">
-        <div style="height:6px;background:${accent};"></div>
-        <div style="padding:28px 24px;flex:1;display:flex;flex-direction:column;justify-content:center;">
-          <div style="font-size:28px;margin-bottom:12px;">${getTopicIcon(b)}</div>
-          <li data-editable="true" style="font-size:17px;color:${C.text};line-height:1.6;list-style:none;margin:0;padding:0;">${b}</li>
-        </div>
-      </div>`;
-    }).join('');
-
-    return `<div style="${baseStyle}background:${C.bgAlt};">
-      <div style="padding:36px 40px 0 40px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-          <div style="width:4px;height:32px;background:${C.primary};border-radius:2px;"></div>
-          <h2 data-editable="true" style="font-size:28px;font-weight:700;color:${C.text};margin:0;">${slide.title}</h2>
-        </div>
-        <p data-editable="true" style="font-size:14px;color:${C.textLight};margin:4px 0 0 16px;">${toTakeaway(slide.key_message)}</p>
-      </div>
-      <div style="display:flex;gap:20px;padding:32px 40px;align-items:stretch;">
-        ${cards}
-      </div>
-      ${footer}
-    </div>`;
-  }
-
-  // ---------- Content-flow layout (5+ bullets) ----------
-  const half = Math.ceil(bullets.length / 2);
-  const leftItems = bullets.slice(0, half);
-  const rightItems = bullets.slice(half);
-
-  const leftHtml = leftItems.map((b, i) =>
-    `<div style="display:flex;align-items:flex-start;gap:14px;margin-bottom:16px;">
-      <div style="flex-shrink:0;width:32px;height:32px;border-radius:50%;background:${C.primary};color:#fff;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;">${i + 1}</div>
-      <li data-editable="true" style="font-size:16px;color:${C.text};line-height:1.5;list-style:none;margin:0;padding:4px 0;">${b}</li>
-    </div>`
-  ).join('');
-
-  const rightHtml = rightItems.map((b, i) => {
-    const accent = CARD_ACCENTS[(i + half) % CARD_ACCENTS.length];
-    return `<div style="background:${C.bg};border-left:4px solid ${accent};border-radius:8px;padding:14px 18px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
-      <li data-editable="true" style="font-size:15px;color:${C.text};line-height:1.5;list-style:none;margin:0;padding:0;">${b}</li>
-    </div>`;
-  }).join('');
-
-  return `<div style="${baseStyle}background:${C.bgAlt};">
-    <div style="padding:36px 40px 0 40px;">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-        <div style="width:4px;height:32px;background:${C.primary};border-radius:2px;"></div>
-        <h2 data-editable="true" style="font-size:28px;font-weight:700;color:${C.text};margin:0;">${slide.title}</h2>
-      </div>
-      <p data-editable="true" style="font-size:14px;color:${C.textLight};margin:4px 0 0 16px;">${toTakeaway(slide.key_message)}</p>
-    </div>
-    <div style="display:flex;gap:32px;padding:28px 40px;flex:1;">
-      <div style="flex:1;">${leftHtml}</div>
-      <div style="flex:1;">${rightHtml}</div>
-    </div>
-    ${footer}
-  </div>`;
+  if (current) slides.push(current);
+  return { title, slides };
 }
 
 // ============================================================
 // Component
 // ============================================================
 
-interface VisualSlideViewerProps {
+interface HtmlSlideViewerProps {
   open: boolean;
   question: string;
   answer?: string;
-  mode?: string;
   onClose: () => void;
 }
 
-export function VisualSlideViewer({ open, question, answer, mode, onClose }: VisualSlideViewerProps) {
+export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideViewerProps) {
   // Phase state
-  const [phase, setPhase] = useState<Phase>('outline_loading');
+  const [phase, setPhase] = useState<Phase>('planning');
   const [error, setError] = useState<string | null>(null);
 
-  // Outline phase
-  const [outline, setOutline] = useState<Outline | null>(null);
-  const [presets, setPresets] = useState<Record<string, StylePreset>>({});
-  const [selectedPreset, setSelectedPreset] = useState<string>('corporate');
+  // Plan phase
+  const [planMd, setPlanMd] = useState<string>('');
+  const [deckTitle, setDeckTitle] = useState<string>('');
+  const [slideSections, setSlideSections] = useState<SlideSection[]>([]);
 
   // Generation phase
   const [generatedSlides, setGeneratedSlides] = useState<GeneratedSlide[]>([]);
@@ -271,7 +130,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
 
   // Refs
   const abortRef = useRef<AbortController | null>(null);
-  const outlineFetchedRef = useRef(false);
+  const planFetchedRef = useRef(false);
   const slideContainerRef = useRef<HTMLDivElement>(null);
   const mainAreaRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(0.5);
@@ -283,7 +142,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
   const updateScale = useCallback(() => {
     const el = mainAreaRef.current;
     if (!el) return;
-    const padding = 80; // space for arrows
+    const padding = 80;
     const availW = el.clientWidth - padding;
     const availH = el.clientHeight - padding;
     const s = Math.min(availW / SLIDE_W, availH / SLIDE_H, 1);
@@ -298,19 +157,19 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
   }, [phase, updateScale]);
 
   // ============================================================
-  // Phase 1: Fetch outline
+  // Phase 1: Generate plan
   // ============================================================
 
-  const fetchOutline = useCallback(async () => {
-    setPhase('outline_loading');
+  const fetchPlan = useCallback(async () => {
+    setPhase('planning');
     setError(null);
-    outlineFetchedRef.current = true;
+    planFetchedRef.current = true;
 
     try {
-      const res = await fetch(`/api/slides/visual/outline`, {
+      const res = await fetch('/api/slides/htmlslide/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, answer, mode: mode || 'standard', use_llm: true }),
+        body: JSON.stringify({ question, answer }),
       });
 
       if (!res.ok) {
@@ -324,28 +183,33 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
       }
 
       const data = await res.json();
-      setOutline(data.outline);
-      setPresets(data.presets || {});
-      setSelectedPreset(data.style_preset || 'corporate');
-      setPhase('outline_ready');
+      const md = data.plan_md || '';
+      setPlanMd(md);
+
+      const parsed = parsePlanMd(md);
+      setDeckTitle(parsed.title);
+      setSlideSections(parsed.slides);
+      setPhase('plan_ready');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to generate outline');
+      setError(e instanceof Error ? e.message : 'Failed to generate plan');
       setPhase('error');
     }
-  }, [question, answer, mode]);
+  }, [question, answer]);
 
   useEffect(() => {
-    if (open && !outlineFetchedRef.current) {
-      fetchOutline();
+    if (open && !planFetchedRef.current) {
+      fetchPlan();
     }
-  }, [open, fetchOutline]);
+  }, [open, fetchPlan]);
 
   // Reset on close
   useEffect(() => {
     if (!open) {
-      outlineFetchedRef.current = false;
-      setPhase('outline_loading');
-      setOutline(null);
+      planFetchedRef.current = false;
+      setPhase('planning');
+      setPlanMd('');
+      setDeckTitle('');
+      setSlideSections([]);
       setGeneratedSlides([]);
       setGeneratingTotal(0);
       setGeneratingCompleted(0);
@@ -364,47 +228,34 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
   // ============================================================
 
   const startGeneration = useCallback(async () => {
-    if (!outline) return;
+    if (slideSections.length === 0) return;
 
     setPhase('generating');
     setError(null);
     setGeneratedSlides([]);
     setGeneratingCompleted(0);
-    setGeneratingTotal(outline.slides.length);
+    setGeneratingTotal(slideSections.length);
 
-    // ---- PPTX Native: local generation, no LLM ----
-    if (selectedPreset === 'pptx-cards') {
-      const total = outline.slides.length;
-      const slides: GeneratedSlide[] = outline.slides.map((s, i) => ({
-        index: i,
-        title: s.title,
-        html: generatePptxNativeHtml(s, outline.title, i, total),
-        outlineSlide: s,
-      }));
-      setGeneratedSlides(slides);
-      setGeneratingCompleted(total);
-      setPhase('done');
-      setActiveSlideIndex(0);
-      return;
-    }
-
-    // ---- LLM-based generation for other presets ----
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
       const slides: GeneratedSlide[] = [];
 
-      for (let i = 0; i < outline.slides.length; i++) {
+      for (let i = 0; i < slideSections.length; i++) {
         if (controller.signal.aborted) return;
 
-        const res = await fetch(`/api/slides/visual/renderhtml`, {
+        const section = slideSections[i];
+        const res = await fetch('/api/slides/htmlslide/render', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            slide: outline.slides[i],
-            style_preset: selectedPreset,
-            deck_title: outline.title,
+            slide_plan_section: section.plan_text,
+            slide_title: section.title,
+            slide_index: i,
+            total_slides: slideSections.length,
+            deck_title: deckTitle,
+            slide_type: section.type,
           }),
           signal: controller.signal,
         });
@@ -420,9 +271,9 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
 
         slides.push({
           index: i,
-          title: outline.slides[i].title,
+          title: section.title,
           html: data.html || '',
-          outlineSlide: outline.slides[i],
+          type: section.type,
           fallback: data.fallback || false,
         });
         setGeneratedSlides([...slides]);
@@ -438,31 +289,26 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
     } finally {
       abortRef.current = null;
     }
-  }, [outline, selectedPreset]);
+  }, [slideSections, deckTitle]);
 
   // ============================================================
   // Editing
   // ============================================================
 
-  // Apply contentEditable whenever editing mode is on and slide changes
   useEffect(() => {
     if (!editing || phase !== 'done') return;
 
-    // Wait for DOM to update after dangerouslySetInnerHTML
     const raf = requestAnimationFrame(() => {
       const container = slideContainerRef.current;
       if (!container) return;
 
-      // Try data-editable first, fallback to all text-bearing elements
       let editables = container.querySelectorAll('[data-editable="true"]');
       if (editables.length === 0) {
-        // Fallback: make all text-bearing leaf elements editable
         editables = container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, span, div');
       }
 
       editables.forEach((el) => {
         const htmlEl = el as HTMLElement;
-        // Only make leaf-ish elements editable (those with direct text content)
         const hasDirectText = Array.from(htmlEl.childNodes).some(
           (n) => n.nodeType === Node.TEXT_NODE && n.textContent && n.textContent.trim().length > 0
         );
@@ -473,11 +319,10 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
         htmlEl.style.outline = 'none';
       });
 
-      // Add focus/blur handlers via event delegation
       const handleFocus = (e: Event) => {
         const target = e.target as HTMLElement;
         if (target.contentEditable === 'true') {
-          target.style.outline = '2px solid rgba(245, 158, 11, 0.6)';
+          target.style.outline = '2px solid rgba(20, 184, 166, 0.6)';
           target.style.outlineOffset = '2px';
           target.style.borderRadius = '4px';
         }
@@ -505,12 +350,10 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
     setEditing(true);
   }, []);
 
-  // Persist current slide's DOM back to state (without exiting editing mode)
   const persistCurrentSlide = useCallback(() => {
     const container = slideContainerRef.current;
     if (!container) return;
 
-    // Clean up contentEditable before capturing HTML
     const editables = container.querySelectorAll('[contenteditable="true"]');
     editables.forEach((el) => {
       (el as HTMLElement).removeAttribute('contenteditable');
@@ -532,46 +375,32 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
   }, [persistCurrentSlide]);
 
   // ============================================================
-  // Redraw current slide (re-render via LLM after editing)
+  // Redraw current slide
   // ============================================================
 
   const [redrawing, setRedrawing] = useState(false);
 
   const redrawCurrentSlide = useCallback(async () => {
-    if (!outline || selectedPreset === 'pptx-cards') return;
     const slide = generatedSlides[activeSlideIndex];
     if (!slide) return;
 
-    // Persist any edits first
     persistCurrentSlide();
-
     setRedrawing(true);
 
     try {
-      // Extract current text from DOM to build updated outline slide
-      const container = slideContainerRef.current;
-      const updatedTexts: string[] = [];
-      if (container) {
-        const editables = container.querySelectorAll('[data-editable="true"]');
-        editables.forEach((el) => {
-          const text = (el as HTMLElement).textContent?.trim();
-          if (text) updatedTexts.push(text);
-        });
-      }
+      const section = slideSections[activeSlideIndex];
+      if (!section) throw new Error('Slide section not found');
 
-      // Build updated outline slide with edited text
-      const updatedOutlineSlide: OutlineSlide = {
-        ...slide.outlineSlide,
-        text_elements: updatedTexts.length > 0 ? updatedTexts : slide.outlineSlide.text_elements,
-      };
-
-      const res = await fetch(`/api/slides/visual/renderhtml`, {
+      const res = await fetch('/api/slides/htmlslide/render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          slide: updatedOutlineSlide,
-          style_preset: selectedPreset,
-          deck_title: outline.title,
+          slide_plan_section: section.plan_text,
+          slide_title: section.title,
+          slide_index: activeSlideIndex,
+          total_slides: slideSections.length,
+          deck_title: deckTitle,
+          slide_type: section.type,
         }),
       });
 
@@ -584,12 +413,9 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
 
       const data = await res.json();
 
-      // Update the slide HTML
       setGeneratedSlides((prev) =>
         prev.map((s, i) =>
-          i === activeSlideIndex
-            ? { ...s, html: data.html || s.html, outlineSlide: updatedOutlineSlide }
-            : s
+          i === activeSlideIndex ? { ...s, html: data.html || s.html } : s
         )
       );
     } catch (e) {
@@ -597,7 +423,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
     } finally {
       setRedrawing(false);
     }
-  }, [outline, selectedPreset, generatedSlides, activeSlideIndex, persistCurrentSlide]);
+  }, [generatedSlides, activeSlideIndex, slideSections, deckTitle, persistCurrentSlide]);
 
   // ============================================================
   // Keyboard navigation
@@ -607,11 +433,8 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
     if (!open || phase !== 'done') return;
 
     const handler = (e: KeyboardEvent) => {
-      // Don't navigate while editing text
       if (editing) {
-        if (e.key === 'Escape') {
-          saveEdits();
-        }
+        if (e.key === 'Escape') saveEdits();
         return;
       }
       if (e.key === 'ArrowLeft') {
@@ -634,7 +457,6 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState('');
 
-  /** Render a single slide's HTML to a PNG data-URL via html2canvas. */
   const renderSlideToPng = useCallback(async (html: string): Promise<string> => {
     const container = document.createElement('div');
     container.style.position = 'fixed';
@@ -650,7 +472,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
       const canvas = await html2canvas(container, {
         width: SLIDE_W,
         height: SLIDE_H,
-        scale: 2, // 2x for crisp output in PPTX
+        scale: 2,
         useCORS: true,
         backgroundColor: '#ffffff',
       });
@@ -666,9 +488,8 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
     setExportProgress('');
 
     try {
-      const title = outline?.title || question;
+      const title = deckTitle || question;
 
-      // --- Image-based export: HTML → PNG → PPTX (pixel-perfect) ---
       const pngs: string[] = [];
       for (let i = 0; i < generatedSlides.length; i++) {
         setExportProgress(`画像化中 ${i + 1}/${generatedSlides.length}`);
@@ -677,7 +498,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
       }
 
       setExportProgress('PPTX生成中...');
-      const res = await fetch(`/api/slides/pptx`, {
+      const res = await fetch('/api/slides/pptx', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, pngs }),
@@ -689,7 +510,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${(outline?.title || 'slides').replace(/[^a-zA-Z0-9\u3040-\u30ff\u4e00-\u9fff _-]/g, '_')}.pptx`;
+      a.download = `${(deckTitle || 'slides').replace(/[^a-zA-Z0-9\u3040-\u30ff\u4e00-\u9fff _-]/g, '_')}.pptx`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -698,7 +519,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
       setExporting(false);
       setExportProgress('');
     }
-  }, [generatedSlides, outline, question, renderSlideToPng]);
+  }, [generatedSlides, deckTitle, question, renderSlideToPng]);
 
   // ============================================================
   // Render
@@ -714,9 +535,9 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border flex-shrink-0">
           <div className="flex items-center gap-2.5">
-            <ImageIcon className="w-5 h-5 text-amber-500" />
+            <FileCode className="w-5 h-5 text-teal-500" />
             <h2 className="text-base font-semibold text-foreground">
-              {outline?.title || 'Visual Slides'}
+              {deckTitle || 'HTML Slides'}
             </h2>
             {phase === 'generating' && (
               <span className="text-xs text-muted-foreground">
@@ -724,8 +545,8 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
               </span>
             )}
             {phase === 'done' && generatedSlides.some(s => s.fallback) && (
-              <span className="text-xs text-amber-500 bg-amber-50 px-2 py-0.5 rounded-full">
-                {generatedSlides.filter(s => s.fallback).length}枚 LLM失敗→フォールバック
+              <span className="text-xs text-teal-500 bg-teal-50 px-2 py-0.5 rounded-full">
+                {generatedSlides.filter(s => s.fallback).length}枚 フォールバック
               </span>
             )}
           </div>
@@ -741,16 +562,14 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
             )}
             {editing && (
               <>
-                {selectedPreset !== 'pptx-cards' && (
-                  <button
-                    onClick={redrawCurrentSlide}
-                    disabled={redrawing}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-amber-100 text-amber-700 border border-amber-300 hover:bg-amber-200 transition-colors disabled:opacity-50"
-                  >
-                    {redrawing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    再描画
-                  </button>
-                )}
+                <button
+                  onClick={redrawCurrentSlide}
+                  disabled={redrawing}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-100 text-teal-700 border border-teal-300 hover:bg-teal-200 transition-colors disabled:opacity-50"
+                >
+                  {redrawing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  再描画
+                </button>
                 <button
                   onClick={saveEdits}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
@@ -763,7 +582,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
               <button
                 onClick={handleExport}
                 disabled={exporting || editing}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-500 text-white hover:bg-teal-600 transition-colors disabled:opacity-50"
               >
                 {exporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
                 {exportProgress || 'PPTX'}
@@ -780,11 +599,11 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
 
         {/* Body */}
         <div className="flex-1 min-h-0 overflow-auto p-5">
-          {/* Phase: Loading outline */}
-          {phase === 'outline_loading' && (
+          {/* Phase: Planning */}
+          {phase === 'planning' && (
             <div className="flex flex-col items-center justify-center h-full gap-3">
-              <Loader2 className="w-8 h-8 text-amber-500 animate-spin" />
-              <p className="text-sm text-muted-foreground">アウトラインを生成中...</p>
+              <Loader2 className="w-8 h-8 text-teal-500 animate-spin" />
+              <p className="text-sm text-muted-foreground">スライド構成を計画中...</p>
             </div>
           )}
 
@@ -793,7 +612,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <p className="text-sm text-destructive">{error}</p>
               <button
-                onClick={fetchOutline}
+                onClick={fetchPlan}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
@@ -802,70 +621,70 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
             </div>
           )}
 
-          {/* Phase: Outline ready */}
-          {phase === 'outline_ready' && outline && (
+          {/* Phase: Plan ready */}
+          {phase === 'plan_ready' && slideSections.length > 0 && (
             <div className="max-w-3xl mx-auto space-y-5">
-              {/* Outline list */}
+              {/* Plan preview */}
               <div className="space-y-2">
                 <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-500" />
-                  スライド構成 ({outline.slides.length}枚)
+                  <FileCode className="w-4 h-4 text-teal-500" />
+                  スライド計画 ({slideSections.length}枚)
                 </h3>
                 <div className="space-y-1.5">
-                  {outline.slides.map((slide) => (
+                  {slideSections.map((section, idx) => (
                     <div
-                      key={slide.slide_number}
+                      key={idx}
                       className="flex items-start gap-3 p-2.5 rounded-lg bg-secondary/30 border border-border/50"
                     >
-                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-amber-100 text-amber-700 text-xs font-bold flex items-center justify-center">
-                        {slide.slide_number}
+                      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-teal-100 text-teal-700 text-xs font-bold flex items-center justify-center">
+                        {idx + 1}
                       </span>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground leading-tight">{slide.title}</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">{slide.key_message}</p>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-foreground leading-tight">{section.title}</p>
+                          <span className={cn(
+                            'text-[10px] px-1.5 py-0.5 rounded-full font-medium',
+                            section.type === 'cover' && 'bg-teal-100 text-teal-700',
+                            section.type === 'back-cover' && 'bg-teal-100 text-teal-700',
+                            section.type === 'content' && 'bg-secondary text-muted-foreground',
+                          )}>
+                            {section.type}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
+                          {section.plan_text.trim().split('\n').slice(0, 2).join(' ')}
+                        </p>
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
 
-              {/* Style preset picker */}
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5">
-                  <Palette className="w-4 h-4 text-amber-500" />
-                  スタイル
-                </h3>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(Object.keys(presets).length > 0 ? presets : DEFAULT_PRESETS).map(([key, preset]) => {
-                    const colors = PRESET_COLORS[key] || PRESET_COLORS.corporate;
-                    const isActive = selectedPreset === key;
-                    return (
-                      <button
-                        key={key}
-                        onClick={() => setSelectedPreset(key)}
-                        className={cn(
-                          'px-3 py-1.5 text-xs font-medium rounded-full border transition-all',
-                          isActive
-                            ? `${colors.activeBg} ${colors.border} ${colors.text} ring-2 ring-offset-1 ring-amber-400`
-                            : `${colors.bg} ${colors.border} ${colors.text} hover:${colors.activeBg}`
-                        )}
-                        title={preset.description}
-                      >
-                        {preset.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              {/* Raw plan (collapsible) */}
+              <details className="group">
+                <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+                  計画の詳細を表示
+                </summary>
+                <pre className="mt-2 p-3 text-xs bg-secondary/30 border border-border/50 rounded-lg overflow-auto max-h-60 whitespace-pre-wrap font-mono">
+                  {planMd}
+                </pre>
+              </details>
 
-              {/* Generate button */}
-              <div className="flex justify-center pt-2">
+              {/* Buttons */}
+              <div className="flex justify-center gap-3 pt-2">
+                <button
+                  onClick={() => { planFetchedRef.current = false; fetchPlan(); }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-xl border border-border text-foreground hover:bg-secondary transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  計画を再生成
+                </button>
                 <button
                   onClick={startGeneration}
-                  className="inline-flex items-center gap-2 px-6 py-2.5 text-sm font-semibold rounded-xl bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-lg shadow-amber-500/20"
+                  className="inline-flex items-center gap-2 px-6 py-2.5 text-sm font-semibold rounded-xl bg-teal-500 text-white hover:bg-teal-600 transition-colors shadow-lg shadow-teal-500/20"
                 >
                   <Sparkles className="w-4 h-4" />
-                  スライドを生成 ({outline.slides.length}枚)
+                  スライドを生成 ({slideSections.length}枚)
                 </button>
               </div>
             </div>
@@ -882,7 +701,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
                 </div>
                 <div className="h-2 bg-secondary rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                    className="h-full bg-teal-500 rounded-full transition-all duration-500"
                     style={{ width: `${generatingTotal > 0 ? (generatingCompleted / generatingTotal) * 100 : 0}%` }}
                   />
                 </div>
@@ -890,14 +709,14 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
 
               {/* Grid of generated slides (thumbnail preview) */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {outline?.slides.map((slide, idx) => {
+                {slideSections.map((section, idx) => {
                   const generated = generatedSlides.find((s) => s.index === idx);
                   return (
                     <div
                       key={idx}
                       className={cn(
                         'relative aspect-video rounded-lg border overflow-hidden',
-                        generated ? 'border-amber-300' : 'border-border bg-secondary/30'
+                        generated ? 'border-teal-300' : 'border-border bg-secondary/30'
                       )}
                     >
                       {generated ? (
@@ -917,7 +736,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
                       ) : (
                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5">
                           <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
-                          <span className="text-[10px] text-muted-foreground">{slide.title}</span>
+                          <span className="text-[10px] text-muted-foreground">{section.title}</span>
                         </div>
                       )}
                     </div>
@@ -946,7 +765,7 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
                   <div
                     className={cn(
                       'rounded-lg shadow-lg overflow-hidden',
-                      editing && 'ring-2 ring-amber-400'
+                      editing && 'ring-2 ring-teal-400'
                     )}
                     style={{
                       width: SLIDE_W * scale,
@@ -981,8 +800,8 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
               {activeSlide && (
                 <p className="text-center text-sm font-medium text-foreground">
                   {activeSlideIndex + 1}/{generatedSlides.length} - {activeSlide.title}
-                  {activeSlide.fallback && <span className="ml-2 text-xs text-amber-500">(フォールバック - LLM生成失敗)</span>}
-                  {editing && <span className="ml-2 text-xs text-amber-500">(編集中 - テキストをクリックして編集)</span>}
+                  {activeSlide.fallback && <span className="ml-2 text-xs text-teal-500">(フォールバック)</span>}
+                  {editing && <span className="ml-2 text-xs text-teal-500">(編集中 - テキストをクリックして編集)</span>}
                 </p>
               )}
 
@@ -995,8 +814,8 @@ export function VisualSlideViewer({ open, question, answer, mode, onClose }: Vis
                     className={cn(
                       'flex-shrink-0 w-28 aspect-video rounded-md border-2 overflow-hidden transition-all',
                       idx === activeSlideIndex
-                        ? 'border-amber-500 ring-2 ring-amber-500/30'
-                        : 'border-border hover:border-amber-300'
+                        ? 'border-teal-500 ring-2 ring-teal-500/30'
+                        : 'border-border hover:border-teal-300'
                     )}
                   >
                     <div

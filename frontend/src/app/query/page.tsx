@@ -31,6 +31,7 @@ import { Source } from '@/components/ai-elements/sources';
 import { Suggestions, Suggestion } from '@/components/ai-elements/suggestion';
 import { SlideStudio, type SlideDeck } from '@/components/ai-elements/slide-studio';
 import { VisualSlideViewer } from '@/components/ai-elements/visual-slide-viewer';
+import { HtmlSlideViewer } from '@/components/ai-elements/html-slide-viewer';
 
 import {
   MessageCircle,
@@ -39,12 +40,12 @@ import {
   Target,
   Upload,
   CheckCircle2,
-  Search,
   RefreshCw,
   FileText,
   Presentation,
   ChevronDown,
   Image,
+  FileCode,
 } from 'lucide-react';
 
 // Search mode definitions
@@ -140,6 +141,12 @@ async function getErrorMessageFromResponse(response: Response, fallback: string)
   }
 }
 
+interface SlideLLMCapability {
+  available: boolean;
+  model: string | null;
+  provider: string | null;
+}
+
 export default function QueryPage() {
   const [question, setQuestion] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -158,6 +165,33 @@ export default function QueryPage() {
 
   // Visual slide viewer state
   const [visualSlideMessageId, setVisualSlideMessageId] = useState<string | null>(null);
+
+  // HTML slide viewer state
+  const [htmlSlideMessageId, setHtmlSlideMessageId] = useState<string | null>(null);
+
+  // Slide LLM capability (fetched from /health)
+  const [slideLLMCapability, setSlideLLMCapability] = useState<SlideLLMCapability>({
+    available: false,
+    model: null,
+    provider: null,
+  });
+
+  // Fetch slide LLM capability on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/health`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.slide_llm) {
+            setSlideLLMCapability(data.slide_llm);
+          }
+        }
+      } catch {
+        // Ignore - will use default (low) capability
+      }
+    })();
+  }, []);
 
   const { files, isUploading, completedCount, totalCount } = useUpload();
   const hasUploads = files.length > 0;
@@ -357,6 +391,10 @@ export default function QueryPage() {
     }
   };
 
+  // Dynamic max_slides based on LLM capability
+  // This is a ceiling — the LLM decides the actual count based on content
+  const slideMaxSlides = slideLLMCapability.available ? 12 : 8;
+
   const handleGenerateSlides = useCallback(async (message: ChatMessage) => {
     const questionText = message.questionText || message.result?.question;
     if (!questionText) return;
@@ -379,7 +417,7 @@ export default function QueryPage() {
           question: questionText,
           answer: message.content,
           mode: (message.result?.mode as SearchMode | undefined) || searchMode,
-          max_slides: 4,
+          max_slides: slideMaxSlides,
         }),
       });
 
@@ -404,7 +442,7 @@ export default function QueryPage() {
     } finally {
       setSlideBusyMessageId(null);
     }
-  }, [openSlideStudio, searchMode, slideDecks, withSlideIds]);
+  }, [openSlideStudio, searchMode, slideDecks, slideMaxSlides, withSlideIds]);
 
   const handleRefineSlides = useCallback(async (instruction: string) => {
     if (!activeSlideMessageId) return;
@@ -424,7 +462,7 @@ export default function QueryPage() {
           instruction,
           deck: current.deck,
           mode: current.mode,
-          max_slides: 4,
+          max_slides: slideMaxSlides,
         }),
       });
 
@@ -445,7 +483,7 @@ export default function QueryPage() {
     } finally {
       setSlideBusyMessageId(null);
     }
-  }, [activeSlideMessageId, slideDecks, withSlideIds]);
+  }, [activeSlideMessageId, slideDecks, slideMaxSlides, withSlideIds]);
 
   const handleSuggestionClick = (suggestion: string) => {
     setQuestion(suggestion);
@@ -564,23 +602,34 @@ export default function QueryPage() {
                               onClick={() => handleGenerateSlides(message)}
                               disabled={isLoading || slideBusyMessageId === message.id}
                               className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full border border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                              title="回答からスライド資料を作成"
+                              title={slideLLMCapability.available
+                                ? `高品質スライド生成 (${slideLLMCapability.model || 'LLM'}, 最大${slideMaxSlides}枚)`
+                                : '回答からスライド資料を作成 (最大8枚)'}
                             >
                               {slideBusyMessageId === message.id ? (
                                 <RefreshCw className="w-3 h-3 animate-spin" />
                               ) : (
                                 <Presentation className="w-3 h-3" />
                               )}
-                              スライド
+                              スライド{slideLLMCapability.available ? '+' : ''}
                             </button>
                             <button
                               onClick={() => setVisualSlideMessageId(message.id)}
                               disabled={isLoading}
                               className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full border border-amber-300/50 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                              title="AIで画像スライドを生成"
+                              title="AIで高品質ビジュアルスライドを生成"
                             >
                               <Image className="w-3 h-3" />
                               ビジュアル
+                            </button>
+                            <button
+                              onClick={() => setHtmlSlideMessageId(message.id)}
+                              disabled={isLoading}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded-full border border-teal-300/50 bg-teal-50 text-teal-700 hover:bg-teal-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="2ステップLLMでHTMLスライドを生成"
+                            >
+                              <FileCode className="w-3 h-3" />
+                              HTMLスライド
                             </button>
                             {slideError && slideErrorMessageId === message.id && (
                               <span className="text-[11px] text-destructive">{slideError}</span>
@@ -706,6 +755,18 @@ export default function QueryPage() {
             answer={msg?.content}
             mode={(msg?.result?.mode as string | undefined) || searchMode}
             onClose={() => setVisualSlideMessageId(null)}
+          />
+        );
+      })()}
+
+      {htmlSlideMessageId && (() => {
+        const msg = messages.find((m) => m.id === htmlSlideMessageId);
+        return (
+          <HtmlSlideViewer
+            open={true}
+            question={msg?.questionText || msg?.result?.question || ''}
+            answer={msg?.content}
+            onClose={() => setHtmlSlideMessageId(null)}
           />
         );
       })()}
