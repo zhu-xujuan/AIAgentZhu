@@ -870,9 +870,10 @@ Markdown形式で各スライドの構成計画を出力してください。
 4. 「デザイン」には具体的な色コード・レイアウト手法・背景スタイルを指定
 5. 「ビジュアル要素」にはSVGアイコン・CSSテーブル・フロー図・バーチャート等の具体的技法を指定
 6. 「レイアウト」は icon-grid / split-screen / cards / timeline / comparison / data-chart から選択
-7. 枚数は内容に応じて自動決定（3〜15枚）
+7. 枚数は内容に応じて自動決定（3〜15枚）。回答内容が豊富な場合は省略せず充分な枚数を確保する
 8. 文書にない情報は推測しない
 9. 数値データがある場合は必ずテーブルまたはチャートをビジュアル要素に指定
+10. スタイル指定がある場合、色スタイル・フォント・対象層を全スライドの「デザイン」欄に必ず反映すること
 """
 
 
@@ -882,8 +883,34 @@ async def generate_slide_plan_md(
     answer: Optional[str],
     client: "AIClient",
     max_slides: int = 12,
-) -> str:
-    """Generate a Markdown plan for an HTML slide deck using LLM."""
+    style_options: Optional[dict[str, str]] = None,
+) -> dict:
+    """Generate a Markdown plan for an HTML slide deck using LLM.
+
+    Returns dict with keys:
+      - plan_md: str
+      - source: "llm" | "fallback"
+      - model: str | None
+      - error: str | None
+      - prompt_len: int
+    """
+    # ---- Build style instruction for plan ----
+    style_instruction = ""
+    if style_options:
+        parts = []
+        if style_options.get("industry"):
+            parts.append(f"- 対象産業: {style_options['industry']}（この産業向けの語彙・事例・デザインテーマを使用）")
+        if style_options.get("profession"):
+            parts.append(f"- 対象職種: {style_options['profession']}（この職種に適した専門性レベル・表現を使用）")
+        if style_options.get("ageGroup"):
+            parts.append(f"- 対象年代層: {style_options['ageGroup']}（この年代層に響く表現・レイアウト・フォントサイズを選択）")
+        if style_options.get("colorStyle"):
+            parts.append(f"- 色スタイル: {style_options['colorStyle']}（この色をメインカラーとして全スライドのデザイン指示に反映。アクセント・背景・グラデーションすべてこの色系統に統一）")
+        if style_options.get("font"):
+            parts.append(f"- フォント: {style_options['font']}（デザイン指示にこのフォントファミリーを指定）")
+        if parts:
+            style_instruction = "\n## スタイル指定（必ず全スライドに反映すること）\n" + "\n".join(parts) + "\n"
+
     prompt = f"""以下の情報をもとに、プレゼンテーションスライドの構成計画をMarkdown形式で作成してください。
 
 ## 質問
@@ -891,11 +918,12 @@ async def generate_slide_plan_md(
 
 ## 回答内容（これをスライドにまとめる）
 {answer or "（なし）"}
-
+{style_instruction}
 ## 制約
 - スライド枚数: 最大{max_slides}枚（内容に応じて3〜{max_slides}枚）
 - 最初はcoverスライド（タイトル・日付・発表者欄）
 - 最後はback-coverスライド（まとめ要点 + ご清聴ありがとうございました）
+- 回答内容が充実している場合は、内容を省略せず十分な枚数のスライドを作成すること
 
 ## 重要
 - 「表示テキスト」には、スライド面に実際に表示する具体的な文言を箇条書きで列挙すること
@@ -904,6 +932,10 @@ async def generate_slide_plan_md(
 - 各スライドのデザインに具体的な色コード・背景・レイアウト手法を含めること
 - 数値やリストがある場合、ビジュアル要素にテーブル/チャート/カード等を指定すること
 """
+    prompt_len = len(prompt)
+    model_name = getattr(client, "model", None)
+    logger.info(f"[HTML_SLIDES] Plan generation start: model={model_name}, prompt_len={prompt_len}, style_options={style_options}")
+
     try:
         result = await client.generate(
             prompt=prompt,
@@ -911,18 +943,40 @@ async def generate_slide_plan_md(
             temperature=0.3,
         )
         if result.success and result.text.strip():
-            return result.text.strip()
-        logger.warning(f"[HTML_SLIDES] Plan generation failed: {result.error}, using fallback")
-        return _generate_fallback_plan_md(question, answer, max_slides)
+            plan_text = result.text.strip()
+            logger.info(f"[HTML_SLIDES] Plan LLM OK: {len(plan_text)} chars, model={result.model}")
+            return {"plan_md": plan_text, "source": "llm", "model": result.model, "error": None, "prompt_len": prompt_len}
+        err_msg = f"success={result.success}, error={result.error}, text_len={len(result.text) if result.text else 0}"
+        logger.warning(f"[HTML_SLIDES] Plan LLM failed: {err_msg}, using fallback")
+        fallback_md = _generate_fallback_plan_md(question, answer, max_slides, style_options=style_options)
+        return {"plan_md": fallback_md, "source": "fallback", "model": model_name, "error": err_msg, "prompt_len": prompt_len}
     except Exception as e:
-        logger.warning(f"[HTML_SLIDES] Plan generation error: {e}, using fallback")
-        return _generate_fallback_plan_md(question, answer, max_slides)
+        err_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"[HTML_SLIDES] Plan LLM error: {err_msg}, using fallback")
+        fallback_md = _generate_fallback_plan_md(question, answer, max_slides, style_options=style_options)
+        return {"plan_md": fallback_md, "source": "fallback", "model": model_name, "error": err_msg, "prompt_len": prompt_len}
 
 
-def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides: int = 12) -> str:
+def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides: int = 12, *, style_options: Optional[dict] = None) -> str:
     """Generate a basic MD plan without LLM, with concrete text content."""
     sections = _split_answer_into_sections(answer or "")
     deck_title = _compact(question, 60)
+
+    # ---- Resolve style-based colors ----
+    color_map = {
+        "ブルー": ("#1E3A5F", "#3B82F6"),
+        "グリーン": ("#064E3B", "#10B981"),
+        "ピンク": ("#831843", "#EC4899"),
+        "イエロー": ("#713F12", "#F59E0B"),
+        "パープル": ("#4C1D95", "#8B5CF6"),
+        "レッド": ("#7F1D1D", "#EF4444"),
+        "モノクロ": ("#1F2937", "#6B7280"),
+        "ダーク": ("#0F172A", "#334155"),
+    }
+    color_style = (style_options or {}).get("colorStyle", "")
+    accent_dark, accent_light = color_map.get(color_style, ("#1E3A5F", "#3B82F6"))
+    font_family = (style_options or {}).get("font", "")
+    font_note = f"、フォント: {font_family}" if font_family else ""
 
     lines: list[str] = [f"# {deck_title}", ""]
 
@@ -933,7 +987,7 @@ def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides:
     lines.append(f"  - {deck_title}")
     lines.append("  - 発表日: 2024年")
     lines.append("- レイアウト: 中央揃え")
-    lines.append("- デザイン: グラデーション背景（#1E3A5F → #3B82F6）、白文字44px、サブテキスト20px")
+    lines.append(f"- デザイン: グラデーション背景（{accent_dark} → {accent_light}）、白文字44px、サブテキスト20px{font_note}")
     lines.append("")
 
     slide_num = 2
@@ -947,7 +1001,7 @@ def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides:
         for item in (text_items if text_items else [_compact(answer or question, 120)]):
             lines.append(f"  - {item}")
         lines.append("- レイアウト: cards")
-        lines.append("- デザイン: 白背景、左アクセントバー#3B82F6、カード影付き")
+        lines.append(f"- デザイン: 白背景、左アクセントバー{accent_light}、カード影付き{font_note}")
         lines.append("- ビジュアル要素: SVGアイコン付きカードグリッド")
         lines.append("")
         slide_num += 1
@@ -971,7 +1025,7 @@ def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides:
                 visual = "番号付き丸＋SVG矢印コネクタのステップフロー"
             elif "statistics" in content_hints:
                 layout = "data-chart"
-                visual = "CSSバーチャートまたはテーブル（ヘッダー#3B82F6、交互行色）"
+                visual = f"CSSバーチャートまたはテーブル（ヘッダー{accent_light}、交互行色）"
             elif len(text_items) >= 3:
                 layout = "icon-grid"
                 visual = "SVGアイコン付き2×2または3列カードグリッド"
@@ -980,7 +1034,7 @@ def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides:
                 visual = "左側テキスト＋右側アクセントブロック"
 
             lines.append(f"- レイアウト: {layout}")
-            lines.append(f"- デザイン: 白背景#FFFFFF、アクセント#3B82F6、タイトル28px太字、本文16px")
+            lines.append(f"- デザイン: 白背景#FFFFFF、アクセント{accent_light}、タイトル28px太字、本文16px{font_note}")
             lines.append(f"- ビジュアル要素: {visual}")
             lines.append("")
             slide_num += 1
@@ -995,7 +1049,7 @@ def _generate_fallback_plan_md(question: str, answer: Optional[str], max_slides:
         lines.append(f"  - {item}")
     lines.append("  - ご清聴ありがとうございました")
     lines.append("- レイアウト: 中央揃え")
-    lines.append("- デザイン: グラデーション背景（#1E3A5F → #3B82F6）、白文字")
+    lines.append(f"- デザイン: グラデーション背景（{accent_dark} → {accent_light}）、白文字{font_note}")
     lines.append("")
 
     return "\n".join(lines)
@@ -1163,6 +1217,10 @@ async def render_slide_from_plan(
     deck_title: str,
     slide_type: str,
     client: "AIClient",
+    style_options: Optional[dict[str, str]] = None,
+    template_html: Optional[str] = None,
+    template_header_color: Optional[str] = None,
+    template_footer_color: Optional[str] = None,
 ) -> str:
     """Render a single slide from its MD plan section into styled HTML.
 
@@ -1369,6 +1427,40 @@ async def render_slide_from_plan(
     else:
         visual_directive = "SVGアイコン、色付きブロック、グラデーション等のビジュアル要素を必ず含めること。テキストだけのスライドは禁止。"
 
+    # ---- Build style options section ----
+    style_section = ""
+    if style_options:
+        parts = []
+        if style_options.get("industry"):
+            parts.append(f"- 対象産業: {style_options['industry']}（この産業に適した配色・語彙）")
+        if style_options.get("profession"):
+            parts.append(f"- 対象職種: {style_options['profession']}（この職種の専門性レベル）")
+        if style_options.get("ageGroup"):
+            parts.append(f"- 対象年代層: {style_options['ageGroup']}（この年代層に合わせた表現・レイアウト）")
+        if style_options.get("colorStyle"):
+            parts.append(f"- 色スタイル: {style_options['colorStyle']}（この色をメインカラーとして全体デザインに反映）")
+        if style_options.get("font"):
+            parts.append(f"- フォント: {style_options['font']}（このフォントファミリーをfont-familyに指定）")
+        if parts:
+            style_section = "\n【スタイル指定】\n" + "\n".join(parts) + "\n"
+
+    # ---- Build template section ----
+    template_section = ""
+    if template_html:
+        template_section = f"""
+【テンプレート】
+以下のHTMLテンプレートをベースに使用してください。
+ヘッダー（色: {template_header_color or '自動'}）とフッター（色: {template_footer_color or '自動'}）はそのまま保持。
+
+■ 設計範囲ルール:
+- 背景色・テーブル・図・アイコンなどのビジュアル要素は、できるだけ白い領域（#FFFFFF）の中に配置してください。
+- テキスト内容は、テンプレートの色付き領域の上に配置してもOKです。
+  ただし、背景色を確認し、読みやすいフォント色・サイズを選択してください。
+  （暗い背景なら白文字、明るい背景なら暗い文字）
+
+{template_html}
+"""
+
     prompt = f"""以下の設計指示に従い、プレゼンスライド1枚分のリッチなHTML+インラインCSSを出力してください。
 <div>タグ1つだけを出力。説明文・マークダウン不要。
 
@@ -1379,7 +1471,7 @@ async def render_slide_from_plan(
 レイアウト方式: {layout}
 配色: {design or "白背景、アクセント#3B82F6"}
 {visual_directive}
-
+{style_section}{template_section}
 【表示テキスト】（以下のみをHTMLテキストノードとして表示）
 {text_list or "  （タイトルのみ）"}
 
@@ -1390,7 +1482,7 @@ async def render_slide_from_plan(
 4. テキスト要素に data-editable="true"
 5. SVGアイコン、CSSグラデーション、カード、テーブル等のビジュアル要素を積極的に使う
 6. 単にテキストを羅列するだけのスライドは絶対に作らない
-{example_html}
+{example_html if not template_html else ""}
 ━━━ 出力（<div>のみ） ━━━"""
 
     try:

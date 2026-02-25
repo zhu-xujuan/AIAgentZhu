@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
-import { QueryResult, API_BASE } from '@/lib/api';
+import { QueryResult, API_BASE, saveQAConversation, fetchQADetail, fetchSlideDeckDetail } from '@/lib/api';
 import { useUpload } from '@/context/UploadContext';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
@@ -32,6 +32,7 @@ import { Suggestions, Suggestion } from '@/components/ai-elements/suggestion';
 import { SlideStudio, type SlideDeck } from '@/components/ai-elements/slide-studio';
 import { VisualSlideViewer } from '@/components/ai-elements/visual-slide-viewer';
 import { HtmlSlideViewer } from '@/components/ai-elements/html-slide-viewer';
+import { HistoryPanel } from '@/components/ai-elements/history-panel';
 
 import {
   MessageCircle,
@@ -169,6 +170,18 @@ export default function QueryPage() {
   // HTML slide viewer state
   const [htmlSlideMessageId, setHtmlSlideMessageId] = useState<string | null>(null);
 
+  // History panel
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [loadedDeckId, setLoadedDeckId] = useState<number | null>(null);
+  const [savedSlidesForViewer, setSavedSlidesForViewer] = useState<{
+    slides: { index: number; title: string; html: string; type: string }[];
+    planMd?: string;
+    styleOptions?: Record<string, string>;
+    question: string;
+    answer?: string;
+    deckId: number;
+  } | null>(null);
+
   // Slide LLM capability (fetched from /health)
   const [slideLLMCapability, setSlideLLMCapability] = useState<SlideLLMCapability>({
     available: false,
@@ -295,6 +308,22 @@ export default function QueryPage() {
                       }
                     : msg
                 ));
+
+                // Auto-save Q&A to history
+                saveQAConversation({
+                  question: questionText,
+                  answer: accumulatedText,
+                  sources,
+                  confidence: metadata.confidence || 0,
+                  has_answer: metadata.has_answer || false,
+                  search_time: metadata.search_time_seconds || undefined,
+                  mode: metadata.mode,
+                  from_cache: metadata.from_cache || false,
+                }).then(() => {
+                  setHistoryRefresh((prev) => prev + 1);
+                }).catch(() => {
+                  // Non-critical: ignore save errors
+                });
               } else if (data.type === 'error') {
                 throw new Error(data.error);
               }
@@ -507,8 +536,83 @@ export default function QueryPage() {
 
   const activeSlideState = activeSlideMessageId ? slideDecks[activeSlideMessageId] : null;
 
+  // History panel: Q&A click → load conversation into messages
+  const handleHistoryQASelect = useCallback(async (id: number) => {
+    try {
+      const detail = await fetchQADetail(id);
+      if (!detail) return;
+
+      const userMsg: ChatMessage = {
+        id: `history-user-${id}`,
+        type: 'user',
+        content: detail.question,
+        timestamp: new Date(detail.created_at),
+      };
+      const assistantMsg: ChatMessage = {
+        id: `history-assistant-${id}`,
+        type: 'assistant',
+        content: detail.answer,
+        isStreaming: false,
+        timestamp: new Date(detail.created_at),
+        questionText: detail.question,
+        result: {
+          question: detail.question,
+          answer: detail.answer,
+          sources: detail.sources || [],
+          confidence: detail.confidence || 0,
+          has_answer: detail.has_answer ?? true,
+          search_mode: 'hybrid',
+          error: null,
+          search_time_seconds: detail.search_time || null,
+          mode: detail.mode,
+          from_cache: detail.from_cache,
+        },
+      };
+
+      setMessages([userMsg, assistantMsg]);
+      setError(null);
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  // History panel: Slide click → load deck into viewer
+  const handleHistorySlideSelect = useCallback(async (id: number) => {
+    try {
+      const detail = await fetchSlideDeckDetail(id);
+      if (!detail || !detail.slides.length) return;
+
+      setLoadedDeckId(id);
+      setSavedSlidesForViewer({
+        slides: detail.slides.map((s) => ({
+          index: s.slide_index,
+          title: s.title,
+          html: s.html,
+          type: s.slide_type,
+        })),
+        planMd: detail.plan_md || undefined,
+        styleOptions: detail.style_options || undefined,
+        question: detail.question || '',
+        answer: detail.answer || undefined,
+        deckId: id,
+      });
+    } catch {
+      // Ignore
+    }
+  }, []);
+
   return (
-    <div className="max-w-3xl mx-auto flex flex-col h-full overflow-hidden">
+    <div className="flex w-full h-full overflow-hidden">
+      {/* History sidebar (hidden on mobile) */}
+      <div className="hidden md:block">
+        <HistoryPanel
+          onSelectQA={handleHistoryQASelect}
+          onSelectSlide={handleHistorySlideSelect}
+          refreshTrigger={historyRefresh}
+        />
+      </div>
+
+    <div className="flex-1 max-w-3xl mx-auto flex flex-col h-full overflow-hidden px-4">
       {/* Header */}
       <div className="flex items-center justify-between mb-3 flex-shrink-0">
         <h1 className="text-lg font-semibold text-foreground">Chat</h1>
@@ -767,9 +871,35 @@ export default function QueryPage() {
             question={msg?.questionText || msg?.result?.question || ''}
             answer={msg?.content}
             onClose={() => setHtmlSlideMessageId(null)}
+            onSaveComplete={(deckId) => {
+              setHistoryRefresh((prev) => prev + 1);
+              setLoadedDeckId(deckId);
+            }}
           />
         );
       })()}
+
+      {/* Saved slides from history */}
+      {savedSlidesForViewer && (
+        <HtmlSlideViewer
+          open={true}
+          question={savedSlidesForViewer.question}
+          answer={savedSlidesForViewer.answer}
+          deckId={savedSlidesForViewer.deckId}
+          savedSlides={savedSlidesForViewer.slides}
+          savedPlanMd={savedSlidesForViewer.planMd}
+          savedStyleOptions={savedSlidesForViewer.styleOptions}
+          onClose={() => {
+            setSavedSlidesForViewer(null);
+            setLoadedDeckId(null);
+          }}
+          onSaveComplete={(deckId) => {
+            setHistoryRefresh((prev) => prev + 1);
+            setLoadedDeckId(deckId);
+          }}
+        />
+      )}
+    </div>
     </div>
   );
 }

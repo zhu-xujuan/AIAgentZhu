@@ -233,6 +233,12 @@ async def lifespan(app: FastAPI):
                 logger.info("Query cache (CAG) is ACTIVE - similar questions will be served from cache")
             else:
                 logger.warning("Query cache (CAG) is INACTIVE - cache table could not be created")
+
+            # Ensure history tables exist (Q&A, slides, templates)
+            if db_service.ensure_history_tables():
+                logger.info("History tables ready (qa_conversations, slide_decks, slide_pages, slide_templates)")
+            else:
+                logger.warning("History tables could not be created")
         else:
             logger.warning("Database service not available. QA features will be disabled.")
     except Exception as e:
@@ -362,6 +368,7 @@ class HtmlSlidePlanRequest(BaseModel):
     question: str
     answer: Optional[str] = None
     max_slides: Optional[int] = None  # default 12
+    style_options: Optional[dict] = None
 
 
 class HtmlSlideRenderRequest(BaseModel):
@@ -371,6 +378,51 @@ class HtmlSlideRenderRequest(BaseModel):
     total_slides: int
     deck_title: str
     slide_type: str = "content"
+    style_options: Optional[dict] = None
+    use_templates: bool = False  # テンプレート使用はオプトイン
+
+
+# ---- History / Template models ----
+
+class QAConversationSave(BaseModel):
+    question: str
+    answer: str
+    sources: Optional[List[dict]] = None
+    confidence: Optional[float] = None
+    has_answer: Optional[bool] = True
+    search_time: Optional[float] = None
+    mode: Optional[str] = None
+    from_cache: Optional[bool] = False
+
+
+class SlidePageData(BaseModel):
+    slide_index: int
+    title: Optional[str] = None
+    slide_type: Optional[str] = "content"
+    html: str
+    plan_text: Optional[str] = None
+
+
+class SlideDeckSave(BaseModel):
+    title: str
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    plan_md: Optional[str] = None
+    style_options: Optional[dict] = None
+    slides: List[SlidePageData]
+
+
+class SlideDeckUpdate(BaseModel):
+    slides: List[SlidePageData]
+    style_options: Optional[dict] = None
+
+
+class SlideTemplateSave(BaseModel):
+    name: str
+    position: str  # 'first', 'middle', 'last'
+    html: str
+    header_color: Optional[str] = None
+    footer_color: Optional[str] = None
 
 
 class FormatRequest(BaseModel):
@@ -2336,6 +2388,170 @@ async def render_slide_html(request: VisualSlideRenderHtmlRequest):
             raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================
+# History & Template Endpoints
+# ============================================================
+
+@app.get("/history/qa")
+async def get_qa_history(limit: int = 50, offset: int = 0):
+    """Get Q&A conversation history list."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    items = db_service.get_qa_history(limit=limit, offset=offset)
+    return {"items": items}
+
+
+@app.post("/history/qa")
+async def save_qa_history(data: QAConversationSave):
+    """Save a Q&A conversation to history."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        qa_id = db_service.save_qa_conversation(
+            question=data.question,
+            answer=data.answer,
+            sources=data.sources,
+            confidence=data.confidence,
+            has_answer=data.has_answer if data.has_answer is not None else True,
+            search_time=data.search_time,
+            mode=data.mode,
+            from_cache=data.from_cache if data.from_cache is not None else False,
+        )
+        return {"id": qa_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/qa/{qa_id}")
+async def get_qa_detail(qa_id: int):
+    """Get a single Q&A conversation detail."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    result = db_service.get_qa_detail(qa_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="QA conversation not found")
+    return result
+
+
+@app.get("/history/slides")
+async def get_slide_history(limit: int = 50, offset: int = 0):
+    """Get slide deck history list."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    items = db_service.get_slide_history(limit=limit, offset=offset)
+    return {"items": items}
+
+
+@app.post("/history/slides")
+async def save_slide_history(data: SlideDeckSave):
+    """Save a slide deck with all pages."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        deck_id = db_service.save_slide_deck(
+            title=data.title,
+            question=data.question,
+            answer=data.answer,
+            plan_md=data.plan_md,
+            style_options=data.style_options,
+            slides=[s.model_dump() for s in data.slides],
+        )
+        return {"id": deck_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/history/slides/{deck_id}")
+async def update_slide_history(deck_id: int, data: SlideDeckUpdate):
+    """Update an existing slide deck."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    # Check if deck exists
+    existing = db_service.get_slide_deck_detail(deck_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Slide deck not found")
+    try:
+        db_service.update_slide_deck(
+            deck_id=deck_id,
+            slides=[s.model_dump() for s in data.slides],
+            style_options=data.style_options,
+        )
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/slides/{deck_id}")
+async def get_slide_detail(deck_id: int):
+    """Get a slide deck with all pages."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    result = db_service.get_slide_deck_detail(deck_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Slide deck not found")
+    return result
+
+
+@app.delete("/history/slides/{deck_id}")
+async def delete_slide_history(deck_id: int):
+    """Delete a slide deck."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    existing = db_service.get_slide_deck_detail(deck_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Slide deck not found")
+    try:
+        db_service.delete_slide_deck(deck_id)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/templates/slides")
+async def get_slide_templates():
+    """Get all slide templates."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    templates = db_service.get_slide_templates()
+    return {"items": templates}
+
+
+@app.post("/templates/slides")
+async def save_slide_template(data: SlideTemplateSave):
+    """Save or update a slide template (UPSERT by name+position)."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if data.position not in ("first", "middle", "last"):
+        raise HTTPException(status_code=400, detail="position must be 'first', 'middle', or 'last'")
+    try:
+        template_id = db_service.save_slide_template(
+            name=data.name,
+            position=data.position,
+            html=data.html,
+            header_color=data.header_color,
+            footer_color=data.footer_color,
+        )
+        return {"id": template_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/templates/slides/{template_id}")
+async def delete_slide_template(template_id: int):
+    """Delete a slide template."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        db_service.delete_slide_template(template_id)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# HTML Slide Pipeline
+# ============================================================
+
 @app.post("/pipeline/slides/htmlslide/plan")
 async def html_slide_plan(request: HtmlSlidePlanRequest):
     """
@@ -2350,25 +2566,33 @@ async def html_slide_plan(request: HtmlSlidePlanRequest):
 
     max_slides = request.max_slides or 12
 
-    logger.info(f"[HTML_SLIDES] plan: question='{request.question[:60]}', max_slides={max_slides}")
+    logger.info(f"[HTML_SLIDES] plan: question='{request.question[:60]}', max_slides={max_slides}, style_options={request.style_options}")
 
     start = time.time()
     try:
-        plan_md = await generate_slide_plan_md(
+        plan_result = await generate_slide_plan_md(
             question=request.question,
             answer=request.answer,
             client=client,
             max_slides=max_slides,
+            style_options=request.style_options,
         )
 
+        plan_md = plan_result["plan_md"]
         _deck_title, slides_parsed = parse_slide_plan_md(plan_md)
         elapsed = time.time() - start
-        logger.info(f"[HTML_SLIDES] plan generated: {len(slides_parsed)} slides in {elapsed:.1f}s")
+        source = plan_result.get("source", "unknown")
+        logger.info(f"[HTML_SLIDES] plan generated: {len(slides_parsed)} slides in {elapsed:.1f}s, source={source}")
 
         return {
             "plan_md": plan_md,
             "slides_count": len(slides_parsed),
             "generation_time_seconds": round(elapsed, 2),
+            # Diagnostic info for frontend
+            "plan_source": source,
+            "plan_model": plan_result.get("model"),
+            "plan_error": plan_result.get("error"),
+            "prompt_len": plan_result.get("prompt_len"),
         }
     except Exception as e:
         logger.error(f"[HTML_SLIDES] plan failed: {e}")
@@ -2386,6 +2610,27 @@ async def html_slide_render(request: HtmlSlideRenderRequest):
 
     logger.info(f"[HTML_SLIDES] render: slide {request.slide_index + 1}/{request.total_slides}, type={request.slide_type}")
 
+    # ---- Load template from DB only when explicitly requested ----
+    template_html = None
+    template_header_color = None
+    template_footer_color = None
+    if request.use_templates and db_service:
+        try:
+            if request.slide_index == 0:
+                position = "first"
+            elif request.slide_index == request.total_slides - 1:
+                position = "last"
+            else:
+                position = "middle"
+            tpl = db_service.get_slide_template_by_position(position)
+            if tpl:
+                template_html = tpl.get("html")
+                template_header_color = tpl.get("header_color")
+                template_footer_color = tpl.get("footer_color")
+                logger.info(f"[HTML_SLIDES] Using template '{tpl.get('name')}' for position={position}")
+        except Exception as e:
+            logger.warning(f"[HTML_SLIDES] Template load failed: {e}, proceeding without template")
+
     try:
         html = await render_slide_from_plan(
             slide_section=request.slide_plan_section,
@@ -2395,6 +2640,10 @@ async def html_slide_render(request: HtmlSlideRenderRequest):
             deck_title=request.deck_title,
             slide_type=request.slide_type,
             client=client,
+            style_options=request.style_options,
+            template_html=template_html,
+            template_header_color=template_header_color,
+            template_footer_color=template_footer_color,
         )
 
         # Check if fallback was used

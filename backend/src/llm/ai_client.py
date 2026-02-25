@@ -367,6 +367,17 @@ class AIClient:
             payload["response_format"] = {"type": "json_object"}
 
         response = await client.post(f"{self._openai_path_prefix}/chat/completions", json=payload)
+
+        # If system prompt not supported (e.g. Gemma models), merge into user message and retry
+        if response.status_code == 400 and system:
+            body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            err_msg = str(body.get("error", {}).get("message", ""))
+            if "developer instruction" in err_msg.lower() or "system" in err_msg.lower():
+                logger.info(f"Model {model} does not support system messages, merging into user prompt")
+                messages = [{"role": "user", "content": f"{system}\n\n{prompt}"}]
+                payload["messages"] = messages
+                response = await client.post(f"{self._openai_path_prefix}/chat/completions", json=payload)
+
         response.raise_for_status()
         data = response.json()
 

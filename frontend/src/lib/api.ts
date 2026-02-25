@@ -283,3 +283,202 @@ export async function deleteFile(fileId: string): Promise<DeleteDocumentResult> 
 
   return res.json();
 }
+
+// ============================================================
+// History & Template API
+// ============================================================
+
+export interface QAHistoryItem {
+  id: number;
+  question: string;
+  answer_preview?: string;
+  confidence?: number;
+  has_answer?: boolean;
+  mode?: string;
+  from_cache?: boolean;
+  created_at: string;
+}
+
+export interface QADetail {
+  id: number;
+  question: string;
+  answer: string;
+  sources: Array<{
+    document_name: string;
+    chunk_text: string;
+    similarity: number;
+  }>;
+  confidence?: number;
+  has_answer?: boolean;
+  search_time?: number;
+  mode?: string;
+  from_cache?: boolean;
+  created_at: string;
+}
+
+export interface SlideHistoryItem {
+  id: number;
+  title: string;
+  question?: string;
+  slide_count: number;
+  style_options?: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SlideDeckDetail {
+  id: number;
+  title: string;
+  question?: string;
+  answer?: string;
+  plan_md?: string;
+  style_options?: Record<string, string>;
+  slides: {
+    slide_index: number;
+    title: string;
+    slide_type: string;
+    html: string;
+    plan_text?: string;
+  }[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SlideTemplate {
+  id: number;
+  name: string;
+  position: string;
+  html: string;
+  header_color?: string;
+  footer_color?: string;
+  created_at: string;
+}
+
+// ---- Q&A History ----
+
+export async function fetchQAHistory(limit = 50, offset = 0): Promise<QAHistoryItem[]> {
+  const res = await fetch(`/api/history/qa?limit=${limit}&offset=${offset}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.items || [];
+}
+
+export async function fetchQADetail(id: number): Promise<QADetail> {
+  const res = await fetch(`/api/history/qa/${id}`);
+  if (!res.ok) throw new Error('Failed to fetch QA detail');
+  return res.json();
+}
+
+export async function saveQAConversation(data: {
+  question: string;
+  answer: string;
+  sources?: unknown[];
+  confidence?: number;
+  has_answer?: boolean;
+  search_time?: number;
+  mode?: string;
+  from_cache?: boolean;
+}): Promise<{ id: number }> {
+  const res = await fetch('/api/history/qa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error('Failed to save QA conversation');
+  return res.json();
+}
+
+// ---- Slide History ----
+
+export async function fetchSlideHistory(limit = 50, offset = 0): Promise<SlideHistoryItem[]> {
+  const res = await fetch(`/api/history/slides?limit=${limit}&offset=${offset}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.items || [];
+}
+
+export async function fetchSlideDeckDetail(id: number): Promise<SlideDeckDetail> {
+  const res = await fetch(`/api/history/slides/${id}`);
+  if (!res.ok) throw new Error('Failed to fetch slide deck detail');
+  return res.json();
+}
+
+export async function saveSlideDeck(data: {
+  title: string;
+  question?: string;
+  answer?: string;
+  plan_md?: string;
+  style_options?: Record<string, string | undefined>;
+  slides: {
+    slide_index: number;
+    title?: string;
+    slide_type?: string;
+    html: string;
+    plan_text?: string;
+  }[];
+}): Promise<{ id: number }> {
+  const res = await fetch('/api/history/slides', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error('Failed to save slide deck');
+  return res.json();
+}
+
+export async function updateSlideDeck(id: number, data: {
+  slides: {
+    slide_index: number;
+    title?: string;
+    slide_type?: string;
+    html: string;
+    plan_text?: string;
+  }[];
+  style_options?: Record<string, string | undefined>;
+}): Promise<void> {
+  const res = await fetch(`/api/history/slides/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error('Failed to update slide deck');
+}
+
+export async function deleteSlideDeck(id: number): Promise<void> {
+  const res = await fetch(`/api/history/slides/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete slide deck');
+}
+
+// ---- Slide Templates ----
+
+export async function fetchSlideTemplates(): Promise<SlideTemplate[]> {
+  const res = await fetch('/api/templates/slides');
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.items || [];
+}
+
+export async function saveSlideTemplate(data: {
+  name: string;
+  position: string;
+  html: string;
+  header_color?: string;
+  footer_color?: string;
+}): Promise<{ id: number }> {
+  const res = await fetch('/api/templates/slides', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error('Failed to save slide template');
+  return res.json();
+}
+
+export async function deleteSlideTemplate(id: number): Promise<void> {
+  const res = await fetch(`/api/templates/slides/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete slide template');
+}

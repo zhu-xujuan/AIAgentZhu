@@ -153,3 +153,56 @@ EXCEPTION WHEN duplicate_column THEN
     -- Column already exists, ignore
 END
 $$;
+
+-- Q&A会話履歴
+CREATE TABLE IF NOT EXISTS qa_conversations (
+    id SERIAL PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    sources JSONB DEFAULT '[]',
+    confidence DECIMAL(3,2),
+    has_answer BOOLEAN DEFAULT TRUE,
+    search_time DECIMAL(6,2),
+    mode VARCHAR(20),
+    from_cache BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_qa_conv_created ON qa_conversations(created_at DESC);
+
+-- スライドデッキ
+CREATE TABLE IF NOT EXISTS slide_decks (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    question TEXT,
+    answer TEXT,
+    plan_md TEXT,
+    style_options JSONB DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_slide_decks_created ON slide_decks(created_at DESC);
+
+-- スライドページ（各ページの最終HTML）
+CREATE TABLE IF NOT EXISTS slide_pages (
+    id SERIAL PRIMARY KEY,
+    deck_id INTEGER REFERENCES slide_decks(id) ON DELETE CASCADE,
+    slide_index INTEGER NOT NULL,
+    title TEXT,
+    slide_type VARCHAR(20) DEFAULT 'content',
+    html TEXT NOT NULL,
+    plan_text TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_slide_pages_deck ON slide_pages(deck_id);
+
+-- スライドテンプレート
+CREATE TABLE IF NOT EXISTS slide_templates (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(200) NOT NULL,
+    position VARCHAR(20) NOT NULL,
+    html TEXT NOT NULL,
+    header_color VARCHAR(20),
+    footer_color VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(name, position)
+);

@@ -4,16 +4,22 @@ import { cn } from '@/lib/utils';
 import html2canvas from 'html2canvas';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   ChevronLeft,
   ChevronRight,
   Download,
   Edit3,
   FileCode,
+  FileDown,
   Loader2,
   RefreshCw,
+  Save,
   Sparkles,
   X,
 } from 'lucide-react';
+import { saveSlideDeck, updateSlideDeck } from '@/lib/api';
+import { StyleOptionsPanel, type StyleOptions } from './style-options-panel';
+import { TemplateManager } from './template-manager';
 
 // ============================================================
 // Types
@@ -107,9 +113,27 @@ interface HtmlSlideViewerProps {
   question: string;
   answer?: string;
   onClose: () => void;
+  // History/save support
+  deckId?: number;
+  savedSlides?: { index: number; title: string; html: string; type: string }[];
+  savedPlanMd?: string;
+  savedStyleOptions?: StyleOptions;
+  forceRegenerate?: boolean;
+  onSaveComplete?: (deckId: number) => void;
 }
 
-export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideViewerProps) {
+export function HtmlSlideViewer({
+  open,
+  question,
+  answer,
+  onClose,
+  deckId: initialDeckId,
+  savedSlides,
+  savedPlanMd,
+  savedStyleOptions,
+  forceRegenerate,
+  onSaveComplete,
+}: HtmlSlideViewerProps) {
   // Phase state
   const [phase, setPhase] = useState<Phase>('planning');
   const [error, setError] = useState<string | null>(null);
@@ -127,6 +151,20 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
   // Gallery phase
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [editing, setEditing] = useState(false);
+
+  // Save / deck ID
+  const [currentDeckId, setCurrentDeckId] = useState<number | undefined>(initialDeckId);
+  const [saving, setSaving] = useState(false);
+
+  // Style options (Feature 4)
+  const [styleOptions, setStyleOptions] = useState<StyleOptions>(savedStyleOptions || {});
+
+  // Template manager
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const [useTemplates, setUseTemplates] = useState(false);
+
+  // Plan diagnostics
+  const [planDiag, setPlanDiag] = useState<{ source?: string; model?: string; error?: string; prompt_len?: number; time?: number } | null>(null);
 
   // Refs
   const abortRef = useRef<AbortController | null>(null);
@@ -166,10 +204,15 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
     planFetchedRef.current = true;
 
     try {
+      const hasStyle = !!(styleOptions.industry || styleOptions.profession || styleOptions.ageGroup || styleOptions.colorStyle || styleOptions.font);
       const res = await fetch('/api/slides/htmlslide/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, answer }),
+        body: JSON.stringify({
+          question,
+          answer,
+          ...(hasStyle ? { style_options: styleOptions } : {}),
+        }),
       });
 
       if (!res.ok) {
@@ -186,6 +229,15 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
       const md = data.plan_md || '';
       setPlanMd(md);
 
+      // Capture diagnostics
+      setPlanDiag({
+        source: data.plan_source,
+        model: data.plan_model,
+        error: data.plan_error,
+        prompt_len: data.prompt_len,
+        time: data.generation_time_seconds,
+      });
+
       const parsed = parsePlanMd(md);
       setDeckTitle(parsed.title);
       setSlideSections(parsed.slides);
@@ -194,13 +246,37 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
       setError(e instanceof Error ? e.message : 'Failed to generate plan');
       setPhase('error');
     }
-  }, [question, answer]);
+  }, [question, answer, styleOptions]);
 
   useEffect(() => {
-    if (open && !planFetchedRef.current) {
+    if (!open) return;
+
+    // If we have savedSlides (from history), skip planning and go straight to done
+    if (savedSlides && savedSlides.length > 0 && !forceRegenerate) {
+      planFetchedRef.current = true;
+      setGeneratedSlides(
+        savedSlides.map((s) => ({
+          index: s.index,
+          title: s.title,
+          html: s.html,
+          type: s.type,
+        })),
+      );
+      if (savedPlanMd) {
+        setPlanMd(savedPlanMd);
+        const parsed = parsePlanMd(savedPlanMd);
+        setDeckTitle(parsed.title);
+        setSlideSections(parsed.slides);
+      }
+      setPhase('done');
+      setActiveSlideIndex(0);
+      return;
+    }
+
+    if (!planFetchedRef.current) {
       fetchPlan();
     }
-  }, [open, fetchPlan]);
+  }, [open, fetchPlan, savedSlides, savedPlanMd, forceRegenerate]);
 
   // Reset on close
   useEffect(() => {
@@ -216,12 +292,17 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
       setActiveSlideIndex(0);
       setEditing(false);
       setError(null);
+      setCurrentDeckId(initialDeckId);
+      setSaving(false);
+      setStyleOptions(savedStyleOptions || {});
+      setUseTemplates(false);
+      setPlanDiag(null);
       if (abortRef.current) {
         abortRef.current.abort();
         abortRef.current = null;
       }
     }
-  }, [open]);
+  }, [open, initialDeckId, savedStyleOptions]);
 
   // ============================================================
   // Phase 2: Generate HTML slides
@@ -246,6 +327,8 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
         if (controller.signal.aborted) return;
 
         const section = slideSections[i];
+        // Build style_options if any are set
+        const hasStyle = !!(styleOptions.industry || styleOptions.profession || styleOptions.ageGroup || styleOptions.colorStyle || styleOptions.font);
         const res = await fetch('/api/slides/htmlslide/render', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -256,6 +339,8 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
             total_slides: slideSections.length,
             deck_title: deckTitle,
             slide_type: section.type,
+            ...(hasStyle ? { style_options: styleOptions } : {}),
+            use_templates: useTemplates,
           }),
           signal: controller.signal,
         });
@@ -289,7 +374,7 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
     } finally {
       abortRef.current = null;
     }
-  }, [slideSections, deckTitle]);
+  }, [slideSections, deckTitle, styleOptions, useTemplates]);
 
   // ============================================================
   // Editing
@@ -391,6 +476,7 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
       const section = slideSections[activeSlideIndex];
       if (!section) throw new Error('Slide section not found');
 
+      const hasStyle = !!(styleOptions.industry || styleOptions.profession || styleOptions.ageGroup || styleOptions.colorStyle || styleOptions.font);
       const res = await fetch('/api/slides/htmlslide/render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -401,6 +487,8 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
           total_slides: slideSections.length,
           deck_title: deckTitle,
           slide_type: section.type,
+          ...(hasStyle ? { style_options: styleOptions } : {}),
+          use_templates: useTemplates,
         }),
       });
 
@@ -423,7 +511,7 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
     } finally {
       setRedrawing(false);
     }
-  }, [generatedSlides, activeSlideIndex, slideSections, deckTitle, persistCurrentSlide]);
+  }, [generatedSlides, activeSlideIndex, slideSections, deckTitle, styleOptions, useTemplates, persistCurrentSlide]);
 
   // ============================================================
   // Keyboard navigation
@@ -511,8 +599,10 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
       const a = document.createElement('a');
       a.href = url;
       a.download = `${(deckTitle || 'slides').replace(/[^a-zA-Z0-9\u3040-\u30ff\u4e00-\u9fff _-]/g, '_')}.pptx`;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed');
     } finally {
@@ -520,6 +610,94 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
       setExportProgress('');
     }
   }, [generatedSlides, deckTitle, question, renderSlideToPng]);
+
+  // ============================================================
+  // PDF Export
+  // ============================================================
+
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState('');
+
+  const handlePdfExport = useCallback(async () => {
+    if (generatedSlides.length === 0) return;
+    setExportingPdf(true);
+    setPdfProgress('');
+
+    try {
+      // Generate PDF entirely client-side (no server round-trip)
+      const { jsPDF } = await import('jspdf');
+      const SLIDE_W_MM = 338.67;
+      const SLIDE_H_MM = 190.5;
+      const doc = new jsPDF({
+        orientation: 'landscape',
+        unit: 'mm',
+        format: [SLIDE_W_MM, SLIDE_H_MM],
+      });
+
+      for (let i = 0; i < generatedSlides.length; i++) {
+        setPdfProgress(`画像化中 ${i + 1}/${generatedSlides.length}`);
+        const png = await renderSlideToPng(generatedSlides[i].html);
+        if (i > 0) doc.addPage([SLIDE_W_MM, SLIDE_H_MM], 'landscape');
+        const base64 = png.includes(',') ? png.split(',')[1] : png;
+        doc.addImage(base64, 'PNG', 0, 0, SLIDE_W_MM, SLIDE_H_MM);
+      }
+
+      setPdfProgress('PDF保存中...');
+      const safeName = (deckTitle || 'slides').replace(/[^a-zA-Z0-9\u3040-\u30ff\u4e00-\u9fff _-]/g, '_');
+      doc.save(`${safeName}.pdf`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'PDF export failed');
+    } finally {
+      setExportingPdf(false);
+      setPdfProgress('');
+    }
+  }, [generatedSlides, deckTitle, renderSlideToPng]);
+
+  // ============================================================
+  // Save to DB
+  // ============================================================
+
+  const handleSave = useCallback(async () => {
+    if (generatedSlides.length === 0) return;
+    setSaving(true);
+
+    try {
+      const slidesData = generatedSlides.map((s, i) => ({
+        slide_index: i,
+        title: s.title,
+        slide_type: s.type,
+        html: s.html,
+        plan_text: slideSections[i]?.plan_text,
+      }));
+
+      const styleRecord = styleOptions as Record<string, string | undefined>;
+
+      if (currentDeckId) {
+        // Update existing
+        await updateSlideDeck(currentDeckId, {
+          slides: slidesData,
+          style_options: styleRecord,
+        });
+        onSaveComplete?.(currentDeckId);
+      } else {
+        // Create new
+        const result = await saveSlideDeck({
+          title: deckTitle || question,
+          question,
+          answer,
+          plan_md: planMd || undefined,
+          style_options: styleRecord,
+          slides: slidesData,
+        });
+        setCurrentDeckId(result.id);
+        onSaveComplete?.(result.id);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  }, [generatedSlides, currentDeckId, deckTitle, question, answer, planMd, slideSections, styleOptions, onSaveComplete]);
 
   // ============================================================
   // Render
@@ -552,13 +730,22 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
           </div>
           <div className="flex items-center gap-2">
             {phase === 'done' && generatedSlides.length > 0 && !editing && (
-              <button
-                onClick={enableEditing}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-secondary text-foreground hover:bg-secondary/80 transition-colors"
-              >
-                <Edit3 className="w-3.5 h-3.5" />
-                編集
-              </button>
+              <>
+                <button
+                  onClick={() => setPhase('plan_ready')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  計画に戻る
+                </button>
+                <button
+                  onClick={enableEditing}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-secondary text-foreground hover:bg-secondary/80 transition-colors"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  編集
+                </button>
+              </>
             )}
             {editing && (
               <>
@@ -578,15 +765,33 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
                 </button>
               </>
             )}
-            {phase === 'done' && generatedSlides.length > 0 && (
-              <button
-                onClick={handleExport}
-                disabled={exporting || editing}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-500 text-white hover:bg-teal-600 transition-colors disabled:opacity-50"
-              >
-                {exporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                {exportProgress || 'PPTX'}
-              </button>
+            {phase === 'done' && generatedSlides.length > 0 && !editing && (
+              <>
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors disabled:opacity-50"
+                >
+                  {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  {currentDeckId ? '更新' : '保存'}
+                </button>
+                <button
+                  onClick={handleExport}
+                  disabled={exporting}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-teal-500 text-white hover:bg-teal-600 transition-colors disabled:opacity-50"
+                >
+                  {exporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {exportProgress || 'PPTX'}
+                </button>
+                <button
+                  onClick={handlePdfExport}
+                  disabled={exportingPdf}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500 text-white hover:bg-rose-600 transition-colors disabled:opacity-50"
+                >
+                  {exportingPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+                  {pdfProgress || 'PDF'}
+                </button>
+              </>
             )}
             <button
               onClick={onClose}
@@ -630,6 +835,23 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
                   <FileCode className="w-4 h-4 text-teal-500" />
                   スライド計画 ({slideSections.length}枚)
                 </h3>
+                {/* Plan diagnostics banner */}
+                {planDiag && (
+                  <div className={cn(
+                    'text-[10px] px-2.5 py-1.5 rounded-md border flex items-center gap-3 flex-wrap',
+                    planDiag.source === 'llm'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                      : 'bg-amber-50 border-amber-200 text-amber-700',
+                  )}>
+                    <span className="font-bold">{planDiag.source === 'llm' ? 'LLM生成' : 'フォールバック'}</span>
+                    {planDiag.model && <span>model: {planDiag.model}</span>}
+                    {planDiag.time != null && <span>{planDiag.time}s</span>}
+                    {planDiag.prompt_len != null && <span>prompt: {planDiag.prompt_len}文字</span>}
+                    {planDiag.source === 'fallback' && planDiag.error && (
+                      <span className="text-red-600">err: {planDiag.error}</span>
+                    )}
+                  </div>
+                )}
                 <div className="space-y-1.5">
                   {slideSections.map((section, idx) => (
                     <div
@@ -669,6 +891,28 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
                   {planMd}
                 </pre>
               </details>
+
+              {/* Style Options + Template Toggle */}
+              <div className="flex justify-center items-center gap-2">
+                <StyleOptionsPanel value={styleOptions} onChange={setStyleOptions} />
+                <button
+                  onClick={() => setUseTemplates(!useTemplates)}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg transition-colors',
+                    useTemplates
+                      ? 'bg-teal-100 text-teal-700 border border-teal-300'
+                      : 'bg-secondary text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  テンプレート{useTemplates ? ' ON' : ''}
+                </button>
+                <button
+                  onClick={() => setTemplateManagerOpen(true)}
+                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors underline"
+                >
+                  管理
+                </button>
+              </div>
 
               {/* Buttons */}
               <div className="flex justify-center gap-3 pt-2">
@@ -835,6 +1079,12 @@ export function HtmlSlideViewer({ open, question, answer, onClose }: HtmlSlideVi
             </div>
           )}
         </div>
+
+        {/* Template Manager modal */}
+        <TemplateManager
+          open={templateManagerOpen}
+          onClose={() => setTemplateManagerOpen(false)}
+        />
       </div>
     </div>
   );
