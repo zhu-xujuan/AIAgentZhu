@@ -388,6 +388,22 @@ export async function saveQAConversation(data: {
   return res.json();
 }
 
+export async function renameQAConversation(id: number, name: string): Promise<void> {
+  const res = await fetch(`/api/history/qa/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: name }),
+  });
+  if (!res.ok) throw new Error('Failed to rename QA conversation');
+}
+
+export async function deleteQAConversation(id: number): Promise<void> {
+  const res = await fetch(`/api/history/qa/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete QA conversation');
+}
+
 // ---- Slide History ----
 
 export async function fetchSlideHistory(limit = 50, offset = 0): Promise<SlideHistoryItem[]> {
@@ -442,6 +458,15 @@ export async function updateSlideDeck(id: number, data: {
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error('Failed to update slide deck');
+}
+
+export async function renameSlideDeck(id: number, title: string): Promise<void> {
+  const res = await fetch(`/api/history/slides/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error('Failed to rename slide deck');
 }
 
 export async function deleteSlideDeck(id: number): Promise<void> {

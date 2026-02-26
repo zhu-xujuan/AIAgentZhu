@@ -5,19 +5,28 @@ import html2canvas from 'html2canvas';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Circle,
   Download,
   Edit3,
   FileCode,
   FileDown,
+  Image,
+  Layers,
   Loader2,
+  Minus,
+  Palette,
+  Plus,
   RefreshCw,
+  Type,
   Save,
   Sparkles,
+  Upload,
   X,
 } from 'lucide-react';
-import { saveSlideDeck, updateSlideDeck } from '@/lib/api';
+import { saveSlideDeck, updateSlideDeck, fetchSlideTemplates, type SlideTemplate } from '@/lib/api';
 import { StyleOptionsPanel, type StyleOptions } from './style-options-panel';
 import { TemplateManager } from './template-manager';
 
@@ -40,6 +49,7 @@ type GeneratedSlide = {
 };
 
 type Phase =
+  | 'setup'
   | 'planning'
   | 'plan_ready'
   | 'generating'
@@ -49,6 +59,14 @@ type Phase =
 // Slide dimensions (px)
 const SLIDE_W = 1280;
 const SLIDE_H = 720;
+
+// Font family presets
+const FONT_PRESETS = [
+  { label: 'ゴシック体', css: 'Noto Sans JP, Hiragino Sans, sans-serif' },
+  { label: '明朝体', css: 'Noto Serif JP, Hiragino Mincho ProN, serif' },
+  { label: '丸ゴシック', css: 'Rounded Mplus 1c, Noto Sans JP, sans-serif' },
+  { label: 'モノスペース', css: 'Source Code Pro, Noto Sans Mono, monospace' },
+] as const;
 
 // ============================================================
 // Client-side MD parser
@@ -135,7 +153,7 @@ export function HtmlSlideViewer({
   onSaveComplete,
 }: HtmlSlideViewerProps) {
   // Phase state
-  const [phase, setPhase] = useState<Phase>('planning');
+  const [phase, setPhase] = useState<Phase>('setup');
   const [error, setError] = useState<string | null>(null);
 
   // Plan phase
@@ -157,11 +175,20 @@ export function HtmlSlideViewer({
   const [saving, setSaving] = useState(false);
 
   // Style options (Feature 4)
-  const [styleOptions, setStyleOptions] = useState<StyleOptions>(savedStyleOptions || {});
+  const [styleOptions, setStyleOptions] = useState<StyleOptions>({
+    font: 'ゴシック体 (Noto Sans JP, Hiragino Sans)',
+    ...savedStyleOptions,
+  });
+
+  // Editing: global font family (ref to avoid re-render during editing)
+  const editFontRef = useRef('Noto Sans JP, Hiragino Sans, sans-serif');
 
   // Template manager
   const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const [useTemplates, setUseTemplates] = useState(false);
+  const [hasGeneratedOnce, setHasGeneratedOnce] = useState(false);
+  const [templateWarning, setTemplateWarning] = useState<string | null>(null);
+  const [templateList, setTemplateList] = useState<SlideTemplate[]>([]);
 
   // Plan diagnostics
   const [planDiag, setPlanDiag] = useState<{ source?: string; model?: string; error?: string; prompt_len?: number; time?: number } | null>(null);
@@ -171,6 +198,7 @@ export function HtmlSlideViewer({
   const planFetchedRef = useRef(false);
   const slideContainerRef = useRef<HTMLDivElement>(null);
   const mainAreaRef = useRef<HTMLDivElement>(null);
+  const lastFocusedEditableRef = useRef<HTMLElement | null>(null);
   const [scale, setScale] = useState(0.5);
 
   // ============================================================
@@ -197,6 +225,23 @@ export function HtmlSlideViewer({
   // ============================================================
   // Phase 1: Generate plan
   // ============================================================
+
+  // Load template list for setup display
+  const refreshTemplateList = useCallback(async () => {
+    try {
+      const items = await fetchSlideTemplates();
+      setTemplateList(items);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    if (phase === 'setup' && open) refreshTemplateList();
+  }, [phase, open, refreshTemplateList]);
+
+  // Also refresh when template manager closes
+  useEffect(() => {
+    if (!templateManagerOpen && phase === 'setup') refreshTemplateList();
+  }, [templateManagerOpen, phase, refreshTemplateList]);
 
   const fetchPlan = useCallback(async () => {
     setPhase('planning');
@@ -241,12 +286,36 @@ export function HtmlSlideViewer({
       const parsed = parsePlanMd(md);
       setDeckTitle(parsed.title);
       setSlideSections(parsed.slides);
+      setHasGeneratedOnce(true);
       setPhase('plan_ready');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate plan');
       setPhase('error');
     }
   }, [question, answer, styleOptions]);
+
+  const handlePlanGenerate = useCallback(async () => {
+    setTemplateWarning(null);
+    if (useTemplates) {
+      try {
+        const templates = await fetchSlideTemplates();
+        if (!templates || templates.length === 0) {
+          setTemplateWarning('テンプレートがアップロードされていません。「管理」からアップロードしてください。');
+          return;
+        }
+      } catch {
+        setTemplateWarning('テンプレートの確認に失敗しました。');
+        return;
+      }
+    }
+    planFetchedRef.current = false;
+    fetchPlan();
+  }, [useTemplates, fetchPlan]);
+
+  const toggleTemplates = useCallback(() => {
+    setUseTemplates(prev => !prev);
+    setTemplateWarning(null);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -273,16 +342,14 @@ export function HtmlSlideViewer({
       return;
     }
 
-    if (!planFetchedRef.current) {
-      fetchPlan();
-    }
-  }, [open, fetchPlan, savedSlides, savedPlanMd, forceRegenerate]);
+    // Stay in 'setup' phase — don't auto-fetch plan
+  }, [open, savedSlides, savedPlanMd, forceRegenerate]);
 
   // Reset on close
   useEffect(() => {
     if (!open) {
       planFetchedRef.current = false;
-      setPhase('planning');
+      setPhase('setup');
       setPlanMd('');
       setDeckTitle('');
       setSlideSections([]);
@@ -296,6 +363,9 @@ export function HtmlSlideViewer({
       setSaving(false);
       setStyleOptions(savedStyleOptions || {});
       setUseTemplates(false);
+      setHasGeneratedOnce(false);
+      setTemplateWarning(null);
+      editFontRef.current = 'Noto Sans JP, Hiragino Sans, sans-serif';
       setPlanDiag(null);
       if (abortRef.current) {
         abortRef.current.abort();
@@ -383,10 +453,11 @@ export function HtmlSlideViewer({
   useEffect(() => {
     if (!editing || phase !== 'done') return;
 
-    const raf = requestAnimationFrame(() => {
-      const container = slideContainerRef.current;
-      if (!container) return;
+    const container = slideContainerRef.current;
+    if (!container) return;
 
+    // Set up contentEditable on text elements
+    const setup = () => {
       let editables = container.querySelectorAll('[data-editable="true"]');
       if (editables.length === 0) {
         editables = container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, td, th, span, div');
@@ -403,32 +474,33 @@ export function HtmlSlideViewer({
         htmlEl.style.cursor = 'text';
         htmlEl.style.outline = 'none';
       });
+    };
 
-      const handleFocus = (e: Event) => {
-        const target = e.target as HTMLElement;
-        if (target.contentEditable === 'true') {
-          target.style.outline = '2px solid rgba(20, 184, 166, 0.6)';
-          target.style.outlineOffset = '2px';
-          target.style.borderRadius = '4px';
-        }
-      };
-      const handleBlur = (e: Event) => {
-        const target = e.target as HTMLElement;
-        if (target.contentEditable === 'true') {
-          target.style.outline = 'none';
-        }
-      };
+    const handleFocus = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (target.contentEditable === 'true') {
+        lastFocusedEditableRef.current = target;
+        target.style.outline = '2px solid rgba(20, 184, 166, 0.6)';
+        target.style.outlineOffset = '2px';
+        target.style.borderRadius = '4px';
+      }
+    };
+    const handleBlur = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (target.contentEditable === 'true') {
+        target.style.outline = 'none';
+      }
+    };
 
-      container.addEventListener('focusin', handleFocus);
-      container.addEventListener('focusout', handleBlur);
+    const raf = requestAnimationFrame(setup);
+    container.addEventListener('focusin', handleFocus);
+    container.addEventListener('focusout', handleBlur);
 
-      return () => {
-        container.removeEventListener('focusin', handleFocus);
-        container.removeEventListener('focusout', handleBlur);
-      };
-    });
-
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      container.removeEventListener('focusin', handleFocus);
+      container.removeEventListener('focusout', handleBlur);
+    };
   }, [editing, activeSlideIndex, phase]);
 
   const enableEditing = useCallback(() => {
@@ -447,17 +519,60 @@ export function HtmlSlideViewer({
     });
 
     const updatedHtml = container.innerHTML;
+
+    // Apply font override to ALL slides (current from DOM, others from state)
+    const cssFont = editFontRef.current;
+    const overrideTag = `<style id="__font-override">* { font-family: ${cssFont} !important; }</style>`;
     setGeneratedSlides((prev) =>
-      prev.map((s, i) =>
-        i === activeSlideIndex ? { ...s, html: updatedHtml } : s
-      )
+      prev.map((s, i) => {
+        if (i === activeSlideIndex) return { ...s, html: updatedHtml };
+        const cleaned = s.html.replace(/<style id="__font-override">[^<]*<\/style>/g, '');
+        return { ...s, html: overrideTag + cleaned };
+      })
     );
   }, [activeSlideIndex]);
 
   const saveEdits = useCallback(() => {
     persistCurrentSlide();
     setEditing(false);
+
+    // Apply font override to all slides on save
+    const cssFont = editFontRef.current;
+    const overrideTag = `<style id="__font-override">* { font-family: ${cssFont} !important; }</style>`;
+    setGeneratedSlides(prev =>
+      prev.map(s => {
+        const cleaned = s.html.replace(/<style id="__font-override">[^<]*<\/style>/g, '');
+        return { ...s, html: overrideTag + cleaned };
+      })
+    );
   }, [persistCurrentSlide]);
+
+  // Global font change: pure DOM — zero React state updates to protect contentEditable
+  const applyGlobalFont = useCallback((cssFont: string) => {
+    editFontRef.current = cssFont;
+
+    const container = slideContainerRef.current;
+    if (!container) return;
+
+    const styleId = '__font-override';
+    let styleEl = container.querySelector(`#${styleId}`) as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = styleId;
+      container.prepend(styleEl);
+    }
+    styleEl.textContent = `* { font-family: ${cssFont} !important; }`;
+  }, []);
+
+  // Per-element font size adjustment (uses last focused element ref)
+  const adjustFocusedFontSize = useCallback((delta: number) => {
+    const target = lastFocusedEditableRef.current;
+    if (!target || !slideContainerRef.current?.contains(target)) return;
+    const computed = window.getComputedStyle(target);
+    const current = parseFloat(computed.fontSize) || 16;
+    const next = Math.max(8, Math.min(120, current + delta));
+    target.style.fontSize = `${next}px`;
+  }, []);
 
   // ============================================================
   // Redraw current slide
@@ -729,6 +844,15 @@ export function HtmlSlideViewer({
             )}
           </div>
           <div className="flex items-center gap-2">
+            {phase === 'plan_ready' && (
+              <button
+                onClick={() => setPhase('setup')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                設定に戻る
+              </button>
+            )}
             {phase === 'done' && generatedSlides.length > 0 && !editing && (
               <>
                 <button
@@ -749,6 +873,39 @@ export function HtmlSlideViewer({
             )}
             {editing && (
               <>
+                {/* Font family selector (global) */}
+                <div className="flex items-center gap-1 border border-border rounded-lg px-1 py-0.5">
+                  <Type className="w-3 h-3 text-muted-foreground" />
+                  <select
+                    defaultValue={editFontRef.current}
+                    onChange={(e) => applyGlobalFont(e.target.value)}
+                    className="text-[11px] bg-transparent text-foreground outline-none cursor-pointer pr-1"
+                  >
+                    {FONT_PRESETS.map(f => (
+                      <option key={f.label} value={f.css}>{f.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Font size adjustment (per element) */}
+                <div className="flex items-center gap-0.5 border border-border rounded-lg px-1 py-0.5">
+                  <button
+                    onMouseDown={(e) => { e.preventDefault(); adjustFocusedFontSize(-2); }}
+                    className="p-0.5 rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground transition-colors"
+                    title="文字サイズ -2px"
+                  >
+                    <Minus className="w-3 h-3" />
+                  </button>
+                  <span className="text-[10px] text-muted-foreground px-0.5">文字サイズ</span>
+                  <button
+                    onMouseDown={(e) => { e.preventDefault(); adjustFocusedFontSize(2); }}
+                    className="p-0.5 rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground transition-colors"
+                    title="文字サイズ +2px"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                </div>
+
                 <button
                   onClick={redrawCurrentSlide}
                   disabled={redrawing}
@@ -804,6 +961,185 @@ export function HtmlSlideViewer({
 
         {/* Body */}
         <div className="flex-1 min-h-0 overflow-auto p-5">
+          {/* Phase: Setup */}
+          {phase === 'setup' && (() => {
+            const POSITIONS: { key: string; label: string }[] = [
+              { key: 'first', label: '1ページ目' },
+              { key: 'middle', label: '途中ページ' },
+              { key: 'last', label: '最終ページ' },
+            ];
+            const tplByPos = (pos: string) => templateList.find(t => t.position === pos);
+
+            return (
+              <div className="max-w-2xl mx-auto space-y-5 py-4">
+                {/* Header */}
+                <div className="text-center space-y-1">
+                  <h3 className="text-sm font-semibold text-foreground flex items-center justify-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-teal-500" />
+                    スライド生成設定
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    スタイルやテンプレートを設定してから計画を生成できます
+                  </p>
+                </div>
+
+                {/* Style Options (expanded by default) */}
+                <div className="space-y-2">
+                  <StyleOptionsPanel value={styleOptions} onChange={setStyleOptions} defaultExpanded />
+                </div>
+
+                {/* Template Section */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={toggleTemplates}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg transition-colors',
+                        useTemplates
+                          ? 'bg-teal-100 text-teal-700 border border-teal-300'
+                          : 'bg-secondary text-muted-foreground hover:text-foreground',
+                      )}
+                    >
+                      {useTemplates ? 'テンプレート ON' : 'テンプレートOFF'}
+                    </button>
+                    <button
+                      onClick={() => setTemplateManagerOpen(true)}
+                      className="text-[10px] text-muted-foreground hover:text-foreground transition-colors underline"
+                    >
+                      管理
+                    </button>
+                  </div>
+
+                  {/* Template status list */}
+                  <div className="p-3 bg-secondary/30 border border-border/50 rounded-lg space-y-1.5">
+                    {POSITIONS.map(({ key, label }) => {
+                      const tpl = tplByPos(key);
+                      return (
+                        <div key={key} className="flex items-center gap-2 text-xs">
+                          {tpl ? (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-teal-500 flex-shrink-0" />
+                          ) : (
+                            <Circle className="w-3.5 h-3.5 text-muted-foreground/40 flex-shrink-0" />
+                          )}
+                          <span className="text-muted-foreground w-20 flex-shrink-0">{label}</span>
+                          {tpl ? (
+                            <span className="text-foreground flex items-center gap-1 truncate">
+                              {tpl.html?.includes('data-image-template="true"') && (
+                                <Image className="w-3 h-3 text-violet-500 flex-shrink-0" />
+                              )}
+                              {tpl.name}
+                              {tpl.header_color && (
+                                <span
+                                  className="inline-block w-2.5 h-2.5 rounded-sm flex-shrink-0 border border-border"
+                                  style={{ backgroundColor: tpl.header_color }}
+                                />
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground/50">未設定</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {templateList.length === 0 && (
+                      <button
+                        onClick={() => setTemplateManagerOpen(true)}
+                        className="flex items-center gap-1.5 text-[11px] text-teal-600 hover:text-teal-700 transition-colors mt-1"
+                      >
+                        <Upload className="w-3 h-3" />
+                        テンプレートをアップロード
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Template warning */}
+                {templateWarning && (
+                  <div className="text-center">
+                    <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 inline-block">
+                      {templateWarning}
+                    </p>
+                  </div>
+                )}
+
+                {/* Summary Card */}
+                <div className="p-4 bg-card border border-border rounded-xl shadow-sm space-y-3">
+                  <h4 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                    <FileCode className="w-3.5 h-3.5 text-teal-500" />
+                    生成設定まとめ
+                  </h4>
+
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                    {/* Style entries */}
+                    {([
+                      { icon: <Layers className="w-3.5 h-3.5 text-violet-500" />, label: '産業', value: styleOptions.industry },
+                      { icon: <Sparkles className="w-3.5 h-3.5 text-blue-500" />, label: '職種', value: styleOptions.profession },
+                      { icon: <Type className="w-3.5 h-3.5 text-amber-500" />, label: '年代層', value: styleOptions.ageGroup },
+                      { icon: <Palette className="w-3.5 h-3.5 text-pink-500" />, label: '色スタイル', value: styleOptions.colorStyle },
+                    ] as const).map(({ icon, label, value }) => (
+                      <div key={label} className="flex items-center gap-2 min-w-0">
+                        <span className="flex-shrink-0">{icon}</span>
+                        <span className="text-[11px] text-muted-foreground flex-shrink-0">{label}:</span>
+                        <span className={cn(
+                          'text-[11px] font-semibold truncate',
+                          value ? 'text-foreground' : 'text-muted-foreground/40',
+                        )}>
+                          {value || '未選択'}
+                        </span>
+                      </div>
+                    ))}
+
+                    {/* Template status */}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Image className={cn('w-3.5 h-3.5 flex-shrink-0', useTemplates ? 'text-teal-500' : 'text-muted-foreground/40')} />
+                      <span className="text-[11px] text-muted-foreground flex-shrink-0">テンプレート:</span>
+                      <span className={cn(
+                        'text-[11px] font-semibold truncate',
+                        useTemplates ? 'text-teal-600' : 'text-muted-foreground/40',
+                      )}>
+                        {useTemplates
+                          ? templateList.length > 0
+                            ? `ON (${templateList.length}件)`
+                            : 'ON (未アップロード)'
+                          : 'OFF'}
+                      </span>
+                    </div>
+
+                    {/* Font info */}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Type className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                      <span className="text-[11px] text-muted-foreground flex-shrink-0">フォント:</span>
+                      <span className="text-[11px] font-semibold text-foreground truncate">
+                        {styleOptions.font?.split(' (')[0] || 'ゴシック体'}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground/60">(編集画面で変更可)</span>
+                    </div>
+                  </div>
+
+                  {/* Editable note */}
+                  <textarea
+                    placeholder="追加の指示やメモがあれば入力..."
+                    value={(styleOptions as Record<string, string | undefined>)._note ?? ''}
+                    onChange={(e) => setStyleOptions(prev => ({ ...prev, _note: e.target.value } as StyleOptions))}
+                    rows={2}
+                    className="w-full text-xs bg-secondary/30 border border-border/50 rounded-lg px-3 py-2 text-foreground resize-none outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400/30 transition-colors placeholder:text-muted-foreground/40"
+                  />
+                </div>
+
+                {/* Generate button */}
+                <div className="flex justify-center pt-2">
+                  <button
+                    onClick={handlePlanGenerate}
+                    className="inline-flex items-center gap-2 px-6 py-2.5 text-sm font-semibold rounded-xl bg-teal-500 text-white hover:bg-teal-600 transition-colors shadow-lg shadow-teal-500/20"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    {hasGeneratedOnce ? '計画を再生成' : '計画生成'}
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Phase: Planning */}
           {phase === 'planning' && (
             <div className="flex flex-col items-center justify-center h-full gap-3">
@@ -817,11 +1153,11 @@ export function HtmlSlideViewer({
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <p className="text-sm text-destructive">{error}</p>
               <button
-                onClick={fetchPlan}
+                onClick={() => setPhase('setup')}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
               >
-                <RefreshCw className="w-3.5 h-3.5" />
-                再試行
+                <ArrowLeft className="w-3.5 h-3.5" />
+                設定に戻る
               </button>
             </div>
           )}
@@ -896,7 +1232,7 @@ export function HtmlSlideViewer({
               <div className="flex justify-center items-center gap-2">
                 <StyleOptionsPanel value={styleOptions} onChange={setStyleOptions} />
                 <button
-                  onClick={() => setUseTemplates(!useTemplates)}
+                  onClick={toggleTemplates}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg transition-colors',
                     useTemplates
@@ -904,7 +1240,7 @@ export function HtmlSlideViewer({
                       : 'bg-secondary text-muted-foreground hover:text-foreground',
                   )}
                 >
-                  テンプレート{useTemplates ? ' ON' : ''}
+                  {useTemplates ? 'テンプレート ON' : 'テンプレートOFF'}
                 </button>
                 <button
                   onClick={() => setTemplateManagerOpen(true)}
@@ -914,10 +1250,19 @@ export function HtmlSlideViewer({
                 </button>
               </div>
 
+              {/* Template warning */}
+              {templateWarning && (
+                <div className="text-center">
+                  <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 inline-block">
+                    {templateWarning}
+                  </p>
+                </div>
+              )}
+
               {/* Buttons */}
               <div className="flex justify-center gap-3 pt-2">
                 <button
-                  onClick={() => { planFetchedRef.current = false; fetchPlan(); }}
+                  onClick={handlePlanGenerate}
                   className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-xl border border-border text-foreground hover:bg-secondary transition-colors"
                 >
                   <RefreshCw className="w-4 h-4" />

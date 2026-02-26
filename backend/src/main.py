@@ -2433,6 +2433,48 @@ async def get_qa_detail(qa_id: int):
     return result
 
 
+@app.patch("/history/qa/{qa_id}")
+async def rename_qa_history(qa_id: int, data: dict):
+    """Rename a Q&A conversation (update question text)."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    new_name = data.get("question") or data.get("name")
+    if not new_name:
+        raise HTTPException(status_code=400, detail="question or name is required")
+    try:
+        db_service.rename_qa_conversation(qa_id, new_name)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/history/qa/{qa_id}")
+async def delete_qa_history(qa_id: int):
+    """Delete a Q&A conversation."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        db_service.delete_qa_conversation(qa_id)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/history/slides/{deck_id}")
+async def rename_slide_history(deck_id: int, data: dict):
+    """Rename a slide deck title."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    new_title = data.get("title") or data.get("name")
+    if not new_title:
+        raise HTTPException(status_code=400, detail="title or name is required")
+    try:
+        db_service.rename_slide_deck(deck_id, new_title)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/history/slides")
 async def get_slide_history(limit: int = 50, offset: int = 0):
     """Get slide deck history list."""
@@ -2518,20 +2560,36 @@ async def get_slide_templates():
 
 @app.post("/templates/slides")
 async def save_slide_template(data: SlideTemplateSave):
-    """Save or update a slide template (UPSERT by name+position)."""
+    """Save or update a slide template (UPSERT by name+position).
+    For image templates, runs Vision analysis to detect logos, headers, safe areas."""
     if not db_service:
         raise HTTPException(status_code=503, detail="Database not available")
     if data.position not in ("first", "middle", "last"):
         raise HTTPException(status_code=400, detail="position must be 'first', 'middle', or 'last'")
     try:
+        # Analyze image templates using Vision API
+        metadata: dict = {}
+        if 'data-image-template="true"' in data.html:
+            img_match = re.search(r'src="data:image/[^;]+;base64,([^"]+)"', data.html)
+            if img_match:
+                analysis_client = slide_html_client or ai_client
+                if analysis_client:
+                    try:
+                        from src.agents.visual_slide_agent import analyze_template_image
+                        metadata = await analyze_template_image(img_match.group(1), analysis_client)
+                        logger.info(f"[TEMPLATE] Vision analysis complete: {list(metadata.keys())}")
+                    except Exception as analysis_err:
+                        logger.warning(f"[TEMPLATE] Vision analysis failed (saving without): {analysis_err}")
+
         template_id = db_service.save_slide_template(
             name=data.name,
             position=data.position,
             html=data.html,
             header_color=data.header_color,
             footer_color=data.footer_color,
+            metadata=metadata or None,
         )
-        return {"id": template_id}
+        return {"id": template_id, "metadata": metadata}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2614,6 +2672,7 @@ async def html_slide_render(request: HtmlSlideRenderRequest):
     template_html = None
     template_header_color = None
     template_footer_color = None
+    template_metadata = None
     if request.use_templates and db_service:
         try:
             if request.slide_index == 0:
@@ -2627,7 +2686,8 @@ async def html_slide_render(request: HtmlSlideRenderRequest):
                 template_html = tpl.get("html")
                 template_header_color = tpl.get("header_color")
                 template_footer_color = tpl.get("footer_color")
-                logger.info(f"[HTML_SLIDES] Using template '{tpl.get('name')}' for position={position}")
+                template_metadata = tpl.get("metadata") or {}
+                logger.info(f"[HTML_SLIDES] Using template '{tpl.get('name')}' for position={position}, metadata_keys={list(template_metadata.keys()) if template_metadata else 'none'}")
         except Exception as e:
             logger.warning(f"[HTML_SLIDES] Template load failed: {e}, proceeding without template")
 
@@ -2644,6 +2704,7 @@ async def html_slide_render(request: HtmlSlideRenderRequest):
             template_html=template_html,
             template_header_color=template_header_color,
             template_footer_color=template_footer_color,
+            template_metadata=template_metadata,
         )
 
         # Check if fallback was used

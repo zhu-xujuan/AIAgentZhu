@@ -603,6 +603,268 @@ def extract_html_from_response(text: str) -> str:
     return text
 
 
+# ============================================================
+# Image Template Analysis (Vision)
+# ============================================================
+
+TEMPLATE_ANALYSIS_PROMPT = """この画像はプレゼンテーションスライドのテンプレート背景です（1280x720px）。
+以下の要素を検出し、JSONで回答してください:
+
+1. logo_areas: ロゴ・社名画像の位置リスト。各要素は top_pct, left_pct, width_pct, height_pct, description を含む。
+2. header_area: ヘッダーバーまたはタイトル用の色付き帯/線がある場合、top_pct, bottom_pct, background_color (hex), suggested_text_color (hex) を含むオブジェクト。なければ null。
+3. footer_area: フッター帯がある場合、top_pct, bottom_pct を含むオブジェクト。なければ null。
+4. safe_content_area: コンテンツを安全に配置できるメインエリア。top_pct, left_pct, width_pct, height_pct を含む。
+5. dominant_colors: テンプレートの主要色。primary (メイン色), accent (アクセント色), background (背景色) を hex で。
+6. atmosphere: テンプレート全体の雰囲気・スタイルを以下で記述するオブジェクト:
+   - tone: 全体のトーン（例: "フォーマル", "カジュアル", "モダン", "クラシック", "テクノロジー", "ナチュラル", "エレガント"等）
+   - design_style: デザインスタイル（例: "フラット", "グラデーション", "ミニマル", "装飾的", "幾何学的", "有機的"等）
+   - suggested_font_style: 推奨フォントスタイル（例: "ゴシック体（モダン・クリーン）", "明朝体（フォーマル・伝統的）"等）
+   - border_radius: 推奨角丸（例: "0px（シャープ）", "8px（やや丸い）", "16px（丸い）"）
+   - shadow_style: 影のスタイル（例: "なし", "軽い影", "強い影"）
+   - description: テンプレートの雰囲気を1〜2文で自然言語で説明
+
+座標はすべてスライド全体に対するパーセント（0〜100）で指定。
+JSONオブジェクトのみ出力してください。説明文やマークダウンは不要。"""
+
+_TEMPLATE_ANALYSIS_DEFAULT: dict[str, Any] = {
+    "version": 1,
+    "logo_areas": [],
+    "header_area": None,
+    "footer_area": None,
+    "safe_content_area": {"top_pct": 15, "left_pct": 5, "width_pct": 90, "height_pct": 75},
+    "dominant_colors": {"primary": "#333333", "accent": "#3B82F6", "background": "#FFFFFF"},
+    "atmosphere": None,
+}
+
+
+async def analyze_template_image(image_base64: str, client: "AIClient") -> dict:
+    """
+    Analyze a template background image using Gemini Vision.
+
+    Sends the image to the LLM and returns structured metadata about:
+    - Logo positions (bounding boxes)
+    - Header/footer areas
+    - Safe content zones
+    - Dominant colors
+
+    Returns default metadata on failure.
+    """
+    try:
+        # Strip data URL prefix if present
+        if "base64," in image_base64:
+            image_base64 = image_base64.split("base64,", 1)[1]
+
+        result = await client.generate(
+            prompt=TEMPLATE_ANALYSIS_PROMPT,
+            format_json=True,
+            temperature=0.1,
+            images=[image_base64],
+        )
+
+        if not result.success:
+            logger.warning(f"[TEMPLATE_ANALYSIS] Vision call failed: {result.error}")
+            return dict(_TEMPLATE_ANALYSIS_DEFAULT)
+
+        # Parse JSON response
+        text = result.text.strip()
+        # Handle possible code fences
+        fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+        if fence_match:
+            text = fence_match.group(1).strip()
+
+        parsed = json.loads(text)
+        parsed["version"] = 1
+
+        # Validate/clamp percentage values
+        for key in ("safe_content_area",):
+            area = parsed.get(key)
+            if isinstance(area, dict):
+                for pct_key in ("top_pct", "left_pct", "width_pct", "height_pct"):
+                    if pct_key in area:
+                        area[pct_key] = max(0, min(100, float(area[pct_key])))
+
+        for la in parsed.get("logo_areas", []):
+            if isinstance(la, dict):
+                for pct_key in ("top_pct", "left_pct", "width_pct", "height_pct"):
+                    if pct_key in la:
+                        la[pct_key] = max(0, min(100, float(la[pct_key])))
+
+        logger.info(
+            f"[TEMPLATE_ANALYSIS] OK: logos={len(parsed.get('logo_areas', []))}, "
+            f"header={'yes' if parsed.get('header_area') else 'no'}, "
+            f"colors={parsed.get('dominant_colors', {})}"
+        )
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"[TEMPLATE_ANALYSIS] JSON parse error: {e}")
+        return dict(_TEMPLATE_ANALYSIS_DEFAULT)
+    except Exception as e:
+        logger.warning(f"[TEMPLATE_ANALYSIS] Error: {e}")
+        return dict(_TEMPLATE_ANALYSIS_DEFAULT)
+
+
+def _build_image_template_prompt(
+    slide_type: str,
+    metadata: Optional[dict],
+    header_color: Optional[str],
+) -> str:
+    """
+    Build a metadata-aware LLM prompt section for image template slides.
+
+    Uses Vision analysis metadata to give precise instructions per slide type:
+    - cover: title + author only, logo avoidance
+    - content: title on header bar, content in safe area, logo avoidance
+    - back-cover: ending message only, logo avoidance
+    """
+    base = """
+【テンプレート（画像背景）】
+背景画像が自動合成されます。外側divのbackgroundはtransparentに。
+コンテンツ要素は position:relative; z-index:1; を指定。"""
+
+    if not metadata or not metadata.get("version"):
+        # No analysis metadata — use generic instructions
+        return base + """
+テキストの可読性を確保するため、半透明の背景パネル（rgba(0,0,0,0.6) や rgba(255,255,255,0.85)）を
+テキスト・カード・テーブルの背後に配置してください。
+"""
+
+    parts = [base]
+
+    # Logo avoidance
+    logo_areas = metadata.get("logo_areas", [])
+    if logo_areas:
+        for la in logo_areas:
+            if not isinstance(la, dict):
+                continue
+            desc = la.get("description", "ロゴ")
+            t = la.get("top_pct", 0)
+            l = la.get("left_pct", 0)
+            w = la.get("width_pct", 10)
+            h = la.get("height_pct", 10)
+            parts.append(
+                f"■ ロゴ回避: {desc} (top:{t}% left:{l}% {w}%x{h}%) — この領域にコンテンツを配置しないこと"
+            )
+
+    # Safe content area
+    safe = metadata.get("safe_content_area")
+    if isinstance(safe, dict):
+        parts.append(
+            f"■ コンテンツ安全領域: top:{safe.get('top_pct', 15)}% left:{safe.get('left_pct', 5)}% "
+            f"width:{safe.get('width_pct', 90)}% height:{safe.get('height_pct', 75)}%"
+        )
+
+    # Slide-type-specific rules
+    header = metadata.get("header_area")
+
+    if slide_type == "cover":
+        parts.append("""
+■ カバースライドルール:
+- デッキタイトル・著者名・日付のみ表示（本文コンテンツは一切不要）
+- 大きな中央揃えテキスト
+- 半透明パネル（rgba(0,0,0,0.5) or rgba(255,255,255,0.8)）でテキスト可読性確保""")
+
+    elif slide_type == "back-cover":
+        parts.append("""
+■ 最終スライドルール:
+- 「ご清聴ありがとうございました」等の結びメッセージのみ
+- 詳細コンテンツは一切不要
+- 大きな中央揃えテキスト
+- 半透明パネルで可読性確保""")
+
+    else:  # content / middle
+        if isinstance(header, dict):
+            h_top = header.get("top_pct", 0)
+            h_bottom = header.get("bottom_pct", 11)
+            h_bg = header.get("background_color", header_color or "#1E3A5F")
+            h_text = header.get("suggested_text_color", "#FFFFFF")
+            parts.append(f"""
+■ ヘッダーバー検出済み (top:{h_top}%〜{h_bottom}%, 背景色:{h_bg}):
+- ページタイトルをヘッダーバーの上に直接配置（フォント色: {h_text}）
+- タイトル領域に半透明背景パネルを追加しない（テンプレートが既に色帯を持つ）
+- 本文コンテンツは {h_bottom}% より下に配置すること""")
+        parts.append(
+            "- 本文エリアには半透明パネル（rgba(255,255,255,0.85) or rgba(0,0,0,0.6)）を使用"
+        )
+
+    # Dominant colors for styling harmony
+    colors = metadata.get("dominant_colors")
+    if isinstance(colors, dict):
+        parts.append(
+            f"■ テンプレート配色: primary={colors.get('primary', '#333')}, "
+            f"accent={colors.get('accent', '#3B82F6')}"
+        )
+
+    # Atmosphere / style matching
+    atmosphere = metadata.get("atmosphere")
+    if isinstance(atmosphere, dict):
+        atmo_parts = ["■ テンプレート雰囲気に合わせたデザイン（重要）:"]
+        desc = atmosphere.get("description")
+        if desc:
+            atmo_parts.append(f"  テンプレートの雰囲気: {desc}")
+        tone = atmosphere.get("tone")
+        if tone:
+            atmo_parts.append(f"  トーン: {tone} — コンテンツのデザインもこのトーンに合わせること")
+        design_style = atmosphere.get("design_style")
+        if design_style:
+            atmo_parts.append(f"  デザインスタイル: {design_style} — カード・テーブル・図のスタイルをこれに合わせること")
+        font_style = atmosphere.get("suggested_font_style")
+        if font_style:
+            atmo_parts.append(f"  推奨フォント: {font_style}")
+        border_radius = atmosphere.get("border_radius")
+        if border_radius:
+            atmo_parts.append(f"  角丸: {border_radius}")
+        shadow_style = atmosphere.get("shadow_style")
+        if shadow_style:
+            atmo_parts.append(f"  影: {shadow_style}")
+        if colors:
+            atmo_parts.append(
+                f"  配色ルール: アクセント色({colors.get('accent', '#3B82F6')})をボタン・見出し・強調に使用。"
+                f"メイン色({colors.get('primary', '#333')})をヘッダー・枠線に使用。"
+                f"テンプレートの配色と調和する色のみ使うこと。"
+            )
+        parts.append("\n".join(atmo_parts))
+
+    return "\n".join(parts)
+
+
+def _merge_image_template(html: str, template_html: str) -> str:
+    """
+    Merge an image-template background into LLM-generated slide HTML.
+
+    Extracts the <img> tag from the template and injects it as the first child
+    of the generated div, ensuring the image sits behind all content (z-index:0).
+    """
+    # Extract the <img ...> tag from template
+    img_match = re.search(r'(<img\s[^>]*>)', template_html, re.DOTALL)
+    if not img_match:
+        logger.warning("[HTML_SLIDES] Image template has no <img> tag, skipping merge")
+        return html
+
+    img_tag = img_match.group(1)
+
+    # Find the first <div opening tag and inject img right after it
+    first_div_end = re.search(r'(<div[^>]*>)', html)
+    if not first_div_end:
+        return html
+
+    insert_pos = first_div_end.end()
+    # Ensure the outer div has position:relative for the absolute img
+    outer_div = first_div_end.group(1)
+    if "position:" not in outer_div:
+        # Add position:relative to the style
+        if 'style="' in outer_div:
+            html = html[:first_div_end.start()] + outer_div.replace('style="', 'style="position:relative;') + html[first_div_end.end():]
+            insert_pos = first_div_end.start() + len(outer_div.replace('style="', 'style="position:relative;'))
+        else:
+            html = html[:first_div_end.start()] + outer_div[:-1] + ' style="position:relative;">' + html[first_div_end.end():]
+            insert_pos = first_div_end.start() + len(outer_div[:-1] + ' style="position:relative;">')
+
+    merged = html[:insert_pos] + "\n" + img_tag + "\n" + html[insert_pos:]
+    logger.info(f"[HTML_SLIDES] Merged image template into slide HTML (+{len(img_tag)} chars)")
+    return merged
+
+
 def generate_fallback_html(
     *,
     slide: dict[str, Any],
@@ -1221,6 +1483,7 @@ async def render_slide_from_plan(
     template_html: Optional[str] = None,
     template_header_color: Optional[str] = None,
     template_footer_color: Optional[str] = None,
+    template_metadata: Optional[dict] = None,
 ) -> str:
     """Render a single slide from its MD plan section into styled HTML.
 
@@ -1446,7 +1709,9 @@ async def render_slide_from_plan(
 
     # ---- Build template section ----
     template_section = ""
-    if template_html:
+    is_image_template = template_html and 'data-image-template="true"' in template_html
+    if template_html and not is_image_template:
+        # HTML template: inject full HTML into prompt
         template_section = f"""
 【テンプレート】
 以下のHTMLテンプレートをベースに使用してください。
@@ -1460,6 +1725,14 @@ async def render_slide_from_plan(
 
 {template_html}
 """
+    elif is_image_template:
+        # Image template: DON'T send base64 to LLM — use Vision metadata for smart prompts.
+        # The image will be merged into the HTML after LLM generation.
+        template_section = _build_image_template_prompt(
+            slide_type=slide_type,
+            metadata=template_metadata,
+            header_color=template_header_color,
+        )
 
     prompt = f"""以下の設計指示に従い、プレゼンスライド1枚分のリッチなHTML+インラインCSSを出力してください。
 <div>タグ1つだけを出力。説明文・マークダウン不要。
@@ -1494,6 +1767,9 @@ async def render_slide_from_plan(
         if result.success and result.text.strip():
             html = extract_html_from_response(result.text)
             if _is_valid_slide_html(html):
+                # Merge image template background if applicable
+                if is_image_template and template_html:
+                    html = _merge_image_template(html, template_html)
                 logger.info(f"[HTML_SLIDES] Render OK for slide {slide_index + 1} ({len(html)} chars)")
                 return html
             else:
@@ -1525,8 +1801,12 @@ async def render_slide_from_plan(
         "key_message": text_elements[0] if text_elements else slide_title,
         "text_elements": text_elements[:6],
     }
-    return generate_fallback_html(
+    fallback_html = generate_fallback_html(
         slide=fallback_slide,
         style_preset="corporate",
         deck_title=deck_title,
     )
+    # Merge image template background if applicable
+    if is_image_template and template_html:
+        fallback_html = _merge_image_template(fallback_html, template_html)
+    return fallback_html

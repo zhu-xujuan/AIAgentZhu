@@ -218,6 +218,7 @@ class AIClient:
         format_json: bool = False,
         temperature: float = 0.1,
         system: Optional[str] = None,
+        images: Optional[list[str]] = None,
     ) -> GenerateResult:
         """
         Generate text using the configured AI provider.
@@ -228,6 +229,7 @@ class AIClient:
             format_json: If True, request JSON format output.
             temperature: Sampling temperature (0.0-1.0).
             system: Optional system prompt.
+            images: Optional list of base64-encoded images for vision models.
 
         Returns:
             GenerateResult with generated text and metadata.
@@ -245,7 +247,8 @@ class AIClient:
                     )
                 elif self.provider in (AIProvider.OPENAI, AIProvider.AZURE):
                     result = await self._generate_openai(
-                        client, prompt, model, format_json, temperature, system
+                        client, prompt, model, format_json, temperature, system,
+                        images=images,
                     )
                 elif self.provider == AIProvider.ANTHROPIC:
                     result = await self._generate_anthropic(
@@ -350,12 +353,24 @@ class AIClient:
         format_json: bool,
         temperature: float,
         system: Optional[str],
+        images: Optional[list[str]] = None,
     ) -> GenerateResult:
-        """Generate using OpenAI-compatible API."""
+        """Generate using OpenAI-compatible API (supports multimodal with images)."""
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+
+        # Build user message — multimodal if images provided
+        if images:
+            content_parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for img_b64 in images:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                })
+            messages.append({"role": "user", "content": content_parts})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         payload: dict[str, Any] = {
             "model": model,
@@ -374,7 +389,13 @@ class AIClient:
             err_msg = str(body.get("error", {}).get("message", ""))
             if "developer instruction" in err_msg.lower() or "system" in err_msg.lower():
                 logger.info(f"Model {model} does not support system messages, merging into user prompt")
-                messages = [{"role": "user", "content": f"{system}\n\n{prompt}"}]
+                if images:
+                    merged_parts: list[dict[str, Any]] = [{"type": "text", "text": f"{system}\n\n{prompt}"}]
+                    for img_b64 in images:
+                        merged_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}})
+                    messages = [{"role": "user", "content": merged_parts}]
+                else:
+                    messages = [{"role": "user", "content": f"{system}\n\n{prompt}"}]
                 payload["messages"] = messages
                 response = await client.post(f"{self._openai_path_prefix}/chat/completions", json=payload)
 

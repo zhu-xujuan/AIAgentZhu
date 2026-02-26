@@ -962,10 +962,19 @@ class DatabaseService:
                         html TEXT NOT NULL,
                         header_color VARCHAR(20),
                         footer_color VARCHAR(20),
+                        metadata JSONB DEFAULT '{}',
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(name, position)
                     )
                 """)
+                # Auto-migration: add metadata column for existing tables
+                try:
+                    cursor.execute("""
+                        ALTER TABLE slide_templates
+                        ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'
+                    """)
+                except Exception:
+                    pass  # Column already exists or unsupported
                 conn.commit()
 
                 DatabaseService._history_tables_ready = True
@@ -1051,6 +1060,33 @@ class DatabaseService:
             if isinstance(result.get("sources"), str):
                 result["sources"] = json_mod.loads(result["sources"])
             return result
+
+    def rename_qa_conversation(self, qa_id: int, new_question: str) -> None:
+        """Rename (update question text) of a Q&A conversation."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    "UPDATE qa_conversations SET question = %s WHERE id = %s",
+                    (new_question, qa_id),
+                )
+                conn.commit()
+                logger.info(f"Renamed QA conversation id={qa_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to rename QA conversation: {e}")
+                raise
+
+    def delete_qa_conversation(self, qa_id: int) -> None:
+        """Delete a Q&A conversation by id."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute("DELETE FROM qa_conversations WHERE id = %s", (qa_id,))
+                conn.commit()
+                logger.info(f"Deleted QA conversation id={qa_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to delete QA conversation: {e}")
+                raise
 
     # ---- Slide Deck CRUD ----
 
@@ -1202,6 +1238,21 @@ class DatabaseService:
             result["slides"] = [dict(r) for r in cursor.fetchall()]
             return result
 
+    def rename_slide_deck(self, deck_id: int, new_title: str) -> None:
+        """Rename a slide deck title."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    "UPDATE slide_decks SET title = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (new_title, deck_id),
+                )
+                conn.commit()
+                logger.info(f"Renamed slide deck id={deck_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to rename slide deck: {e}")
+                raise
+
     def delete_slide_deck(self, deck_id: int) -> None:
         """Delete a slide deck and its pages (CASCADE)."""
         with self._get_cursor() as (cursor, conn):
@@ -1223,24 +1274,29 @@ class DatabaseService:
         html: str,
         header_color: str | None = None,
         footer_color: str | None = None,
+        metadata: dict | None = None,
     ) -> int:
         """Save or update a slide template (UPSERT by name+position)."""
+        import json as _json
         if not self.ensure_history_tables():
             raise RuntimeError("History tables not available")
+
+        metadata_json = _json.dumps(metadata, ensure_ascii=False) if metadata else None
 
         with self._get_cursor() as (cursor, conn):
             try:
                 cursor.execute(
                     """
-                    INSERT INTO slide_templates (name, position, html, header_color, footer_color)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO slide_templates (name, position, html, header_color, footer_color, metadata)
+                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, '{}')::jsonb)
                     ON CONFLICT (name, position) DO UPDATE SET
                         html = EXCLUDED.html,
                         header_color = EXCLUDED.header_color,
-                        footer_color = EXCLUDED.footer_color
+                        footer_color = EXCLUDED.footer_color,
+                        metadata = EXCLUDED.metadata
                     RETURNING id
                     """,
-                    (name, position, html, header_color, footer_color),
+                    (name, position, html, header_color, footer_color, metadata_json),
                 )
                 template_id = cursor.fetchone()[0]
                 conn.commit()

@@ -75,10 +75,11 @@ interface StyleOptionsPanelProps {
   value: StyleOptions;
   onChange: (value: StyleOptions) => void;
   className?: string;
+  defaultExpanded?: boolean;
 }
 
-export function StyleOptionsPanel({ value, onChange, className }: StyleOptionsPanelProps) {
-  const [expanded, setExpanded] = useState(false);
+export function StyleOptionsPanel({ value, onChange, className, defaultExpanded = false }: StyleOptionsPanelProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   // Track which categories have "その他" selected (by key)
   const [otherTexts, setOtherTexts] = useState<Record<string, string>>({});
 

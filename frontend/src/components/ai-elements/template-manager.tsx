@@ -8,7 +8,30 @@ import {
   deleteSlideTemplate,
   type SlideTemplate,
 } from '@/lib/api';
-import { Eye, Loader2, Trash2, Upload, X } from 'lucide-react';
+import { Eye, Image, Loader2, Trash2, Upload, X } from 'lucide-react';
+
+// ============================================================
+// Helpers
+// ============================================================
+
+const IMAGE_EXTENSIONS = /\.(png|jpe?g)$/i;
+
+/** Read a File as a base64 data-URL string. */
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Wrap a base64 image data-URL in a 1280x720 HTML slide template using <img> tag. */
+function imageToHtmlTemplate(dataUrl: string): string {
+  return `<div data-image-template="true" style="width:1280px;height:720px;position:relative;overflow:hidden;">
+  <img src="${dataUrl}" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0;pointer-events:none;" />
+</div>`;
+}
 
 // ============================================================
 // Types
@@ -69,23 +92,36 @@ export function TemplateManager({ open, onClose }: TemplateManagerProps) {
       setUploading(targetPosition);
 
       try {
-        const htmlText = await file.text();
-
-        // Simple color detection: find first non-white background color
-        const bgColorMatch = htmlText.match(/background(?:-color)?:\s*(#[0-9a-fA-F]{3,8}|rgb[^)]+\))/g);
+        const isImage = IMAGE_EXTENSIONS.test(file.name);
+        let htmlText: string;
         let headerColor: string | undefined;
         let footerColor: string | undefined;
+        let templateName: string;
 
-        if (bgColorMatch) {
-          const nonWhite = bgColorMatch.filter(
-            (c) => !c.includes('#fff') && !c.includes('#FFF') && !c.includes('#ffffff') && !c.includes('#FFFFFF'),
-          );
-          if (nonWhite.length >= 1) headerColor = nonWhite[0].replace(/background(?:-color)?:\s*/, '');
-          if (nonWhite.length >= 2) footerColor = nonWhite[nonWhite.length - 1].replace(/background(?:-color)?:\s*/, '');
+        if (isImage) {
+          // --- Image file: convert to HTML wrapper with background-image ---
+          const dataUrl = await readFileAsDataURL(file);
+          htmlText = imageToHtmlTemplate(dataUrl);
+          templateName = file.name.replace(/\.(png|jpe?g)$/i, '');
+          // No header/footer color extraction for images (background is the image itself)
+        } else {
+          // --- HTML file: existing logic ---
+          htmlText = await file.text();
+          templateName = file.name.replace(/\.html?$/i, '');
+
+          // Simple color detection: find first non-white background color
+          const bgColorMatch = htmlText.match(/background(?:-color)?:\s*(#[0-9a-fA-F]{3,8}|rgb[^)]+\))/g);
+          if (bgColorMatch) {
+            const nonWhite = bgColorMatch.filter(
+              (c) => !c.includes('#fff') && !c.includes('#FFF') && !c.includes('#ffffff') && !c.includes('#FFFFFF'),
+            );
+            if (nonWhite.length >= 1) headerColor = nonWhite[0].replace(/background(?:-color)?:\s*/, '');
+            if (nonWhite.length >= 2) footerColor = nonWhite[nonWhite.length - 1].replace(/background(?:-color)?:\s*/, '');
+          }
         }
 
         await saveSlideTemplate({
-          name: file.name.replace(/\.html?$/i, ''),
+          name: templateName,
           position: targetPosition,
           html: htmlText,
           header_color: headerColor,
@@ -151,11 +187,14 @@ export function TemplateManager({ open, onClose }: TemplateManagerProps) {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-foreground">{label}</p>
                     {tpl ? (
-                      <p className="text-xs text-muted-foreground truncate">
-                        {tpl.name}
+                      <p className="text-xs text-muted-foreground truncate flex items-center gap-1.5">
+                        {tpl.html?.includes('data-image-template="true"') ? (
+                          <Image className="w-3 h-3 text-violet-500 flex-shrink-0" />
+                        ) : null}
+                        <span className="truncate">{tpl.name}</span>
                         {tpl.header_color && (
                           <span
-                            className="inline-block w-3 h-3 rounded-sm ml-1.5 align-middle border border-border"
+                            className="inline-block w-3 h-3 rounded-sm flex-shrink-0 border border-border"
                             style={{ backgroundColor: tpl.header_color }}
                           />
                         )}
@@ -207,11 +246,15 @@ export function TemplateManager({ open, onClose }: TemplateManagerProps) {
               );
             })}
 
+          <p className="text-[10px] text-muted-foreground text-center">
+            HTML (.html) または 画像 (.png, .jpg) をアップロードできます
+          </p>
+
           {/* Hidden file input */}
           <input
             ref={fileInputRef}
             type="file"
-            accept=".html,.htm"
+            accept=".html,.htm,.png,.jpg,.jpeg"
             className="hidden"
             onChange={handleFileChange}
           />
