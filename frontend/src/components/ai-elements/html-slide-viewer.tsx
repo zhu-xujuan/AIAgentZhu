@@ -68,9 +68,13 @@ const FONT_PRESETS = [
   { label: 'モノスペース', css: 'Source Code Pro, Noto Sans Mono, monospace' },
 ] as const;
 
-// Drag-to-move CSS (injected during editing only)
+// Drag-to-move + Resize CSS (injected during editing only)
+// Uses JS-driven [data-hovered] instead of CSS :hover for reliable hover after transforms
 const DRAG_CSS = `
-[data-draggable]:hover > [data-drag-toolbar] { opacity:1 !important }
+[data-draggable] { overflow:visible !important; }
+[data-draggable][data-hovered] > [data-drag-toolbar] { opacity:1 !important }
+[data-draggable][data-hovered] > [data-resize] { opacity:1 !important }
+[data-draggable][data-selected] { outline:2px solid rgba(59,130,246,0.6) !important; outline-offset:2px !important; }
 [data-drag-toolbar] {
   position:absolute; top:-6px; left:-6px; z-index:100;
   display:flex; align-items:center; gap:2px;
@@ -95,6 +99,26 @@ const DRAG_CSS = `
 [data-dragging] {
   outline:2px dashed rgba(20,184,166,0.5) !important;
   outline-offset:2px !important; opacity:0.85;
+}
+[data-resize] {
+  position:absolute; background:white; border:1.5px solid rgba(20,184,166,0.7);
+  border-radius:2px; z-index:101; opacity:0; transition:opacity .15s; pointer-events:auto;
+  box-shadow:0 0 2px rgba(0,0,0,0.1);
+}
+[data-resize="se"],[data-resize="nw"],[data-resize="ne"],[data-resize="sw"] { width:8px; height:8px; }
+[data-resize="se"] { bottom:-4px; right:-4px; cursor:se-resize; }
+[data-resize="sw"] { bottom:-4px; left:-4px; cursor:sw-resize; }
+[data-resize="ne"] { top:-4px; right:-4px; cursor:ne-resize; }
+[data-resize="nw"] { top:-4px; left:-4px; cursor:nw-resize; }
+[data-resize="e"],[data-resize="w"] { width:6px; height:20px; top:50%; margin-top:-10px; }
+[data-resize="n"],[data-resize="s"] { height:6px; width:20px; left:50%; margin-left:-10px; }
+[data-resize="e"] { right:-3px; cursor:e-resize; }
+[data-resize="w"] { left:-3px; cursor:w-resize; }
+[data-resize="n"] { top:-3px; cursor:n-resize; }
+[data-resize="s"] { bottom:-3px; cursor:s-resize; }
+[data-resizing] {
+  outline:2px solid rgba(20,184,166,0.6) !important;
+  outline-offset:1px !important;
 }`;
 
 const GRIP_SVG = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none"><circle cx="4" cy="3" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="3" r="1.5" fill="#9CA3AF"/><circle cx="4" cy="7" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="7" r="1.5" fill="#9CA3AF"/><circle cx="4" cy="11" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="11" r="1.5" fill="#9CA3AF"/></svg>`;
@@ -106,38 +130,60 @@ const TRASH_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" s
 // ============================================================
 
 const SKIP_TAGS = new Set(['script', 'style', 'br', 'hr']);
+const LEAF_TAGS = new Set(['table', 'svg', 'img', 'canvas', 'video', 'iframe']);
 
 function findDraggableBlocks(container: HTMLElement): HTMLElement[] {
-  // Find actual root slide div — skip <style> tags (e.g. __font-override)
+  // Find actual root slide div — skip <style> and injected drag elements
   let root: HTMLElement | null = null;
   for (const child of Array.from(container.children) as HTMLElement[]) {
-    if (child.tagName.toLowerCase() !== 'style') { root = child; break; }
+    const tag = child.tagName.toLowerCase();
+    if (tag === 'style' || child.hasAttribute('data-drag-toolbar') || child.hasAttribute('data-resize')) continue;
+    root = child;
+    break;
   }
   if (!root) return [];
 
   const results: HTMLElement[] = [];
 
+  const isInjected = (el: Element) =>
+    el.hasAttribute('data-drag-toolbar') || el.hasAttribute('data-resize');
+
+  // Count real (non-injected, non-skip) children that meet minimum size
+  const significantChildren = (parent: HTMLElement): HTMLElement[] =>
+    (Array.from(parent.children) as HTMLElement[]).filter((c) => {
+      if (isInjected(c)) return false;
+      const t = c.tagName.toLowerCase();
+      if (SKIP_TAGS.has(t)) return false;
+      return c.offsetHeight >= 20 && c.offsetWidth >= 40;
+    });
+
   const collect = (parent: HTMLElement, depth: number) => {
-    if (depth > 3) return;
+    if (depth > 6) return;
     for (const child of Array.from(parent.children) as HTMLElement[]) {
       const tag = child.tagName.toLowerCase();
       if (SKIP_TAGS.has(tag)) continue;
-      if (tag === 'span' && !child.children.length) continue; // skip inline-only spans
-      if (child.offsetHeight < 24 || child.offsetWidth < 48) continue;
+      if (isInjected(child)) continue;
+      if (child.offsetHeight < 20 || child.offsetWidth < 40) continue;
 
-      const cs = window.getComputedStyle(child);
-      const isLayout = cs.display === 'grid' || cs.display === 'flex';
-
-      // Recurse into: grid/flex containers, or large wrapper divs (>70% parent height)
-      const isLargeWrapper = child.children.length > 1 &&
-        child.offsetHeight > parent.offsetHeight * 0.7;
-
-      if ((isLayout || isLargeWrapper) && child.children.length > 1 && depth < 2) {
-        collect(child, depth + 1);
+      // Tables, SVGs, images — always leaf blocks (no recursion)
+      if (LEAF_TAGS.has(tag)) {
+        results.push(child);
         continue;
       }
 
+      const sigKids = significantChildren(child);
+      // Large block: >50% of slide width(1280) or height(720) → always try to recurse deeper
+      const isLarge = child.offsetWidth > 640 || child.offsetHeight > 360;
+
+      // Push this element as a draggable block
       results.push(child);
+
+      // ALSO recurse into children when:
+      // - 2+ significant children (composite block), OR
+      // - large block with 1+ significant children (try to break it down)
+      if (depth < 6 && (sigKids.length >= 2 || (isLarge && sigKids.length >= 1))) {
+        collect(child, depth + 1);
+      }
     }
   };
 
@@ -184,9 +230,10 @@ function setupDragHandles(container: HTMLElement) {
       el.setAttribute('data-drag-pos', '');
     }
 
-    // Toolbar: drag handle + copy + delete
+    // Toolbar: drag handle + copy + delete (inline position:absolute for safety in grid/flex parents)
     const toolbar = document.createElement('div');
     toolbar.setAttribute('data-drag-toolbar', '');
+    toolbar.style.position = 'absolute';
 
     const grip = document.createElement('div');
     grip.setAttribute('data-drag-handle', '');
@@ -204,14 +251,30 @@ function setupDragHandles(container: HTMLElement) {
 
     toolbar.append(grip, copyBtn, delBtn);
     el.prepend(toolbar);
+
+    // Resize handles: 4 corners + 4 edges
+    for (const dir of ['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w']) {
+      const rh = document.createElement('div');
+      rh.setAttribute('data-resize', dir);
+      el.appendChild(rh);
+    }
   }
 }
 
 function cleanupDragHandles(container: HTMLElement) {
   container.querySelectorAll('[data-drag-toolbar]').forEach((el) => el.remove());
+  container.querySelectorAll('[data-resize]').forEach((el) => el.remove());
   container.querySelectorAll('[data-draggable]').forEach((el) => {
     el.removeAttribute('data-draggable');
     el.removeAttribute('data-dragging');
+    el.removeAttribute('data-resizing');
+    el.removeAttribute('data-hovered');
+    el.removeAttribute('data-selected');
+    // Clean up temporary resize tracking attributes (keep width/height/transform inline styles)
+    (el as HTMLElement).removeAttribute('data-resize-orig-w');
+    (el as HTMLElement).removeAttribute('data-resize-orig-h');
+    (el as HTMLElement).removeAttribute('data-resize-temp-dx');
+    (el as HTMLElement).removeAttribute('data-resize-temp-dy');
   });
   container.querySelectorAll('[data-drag-pos]').forEach((el) => {
     (el as HTMLElement).style.position = '';
@@ -652,6 +715,46 @@ export function HtmlSlideViewer({
       }
     };
 
+    // -- JS-based hover tracking (reliable after transforms, replaces CSS :hover) --
+    let hoveredBlock: HTMLElement | null = null;
+    const onHoverMove = (e: MouseEvent) => {
+      const block = (e.target as HTMLElement).closest('[data-draggable]') as HTMLElement | null;
+      if (block === hoveredBlock) return;
+      if (hoveredBlock) hoveredBlock.removeAttribute('data-hovered');
+      if (block) block.setAttribute('data-hovered', '');
+      hoveredBlock = block;
+    };
+    const onHoverLeave = () => {
+      if (hoveredBlock) { hoveredBlock.removeAttribute('data-hovered'); hoveredBlock = null; }
+    };
+
+    // -- Shift+click multi-select --
+    const selectedBlocks = new Set<HTMLElement>();
+    const onShiftClick = (e: MouseEvent) => {
+      if (!e.shiftKey) return;
+      const target = e.target as HTMLElement;
+      // Don't interfere with text editing or toolbar buttons
+      if (target.contentEditable === 'true' || target.closest('[contenteditable="true"]')) return;
+      if (target.closest('[data-drag-toolbar]') || target.closest('[data-resize]')) return;
+      const block = target.closest('[data-draggable]') as HTMLElement | null;
+      if (!block) return;
+      e.preventDefault();
+      if (selectedBlocks.has(block)) {
+        selectedBlocks.delete(block);
+        block.removeAttribute('data-selected');
+      } else {
+        selectedBlocks.add(block);
+        block.setAttribute('data-selected', '');
+      }
+    };
+    // Clear selection on Escape
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedBlocks.size > 0) {
+        for (const b of selectedBlocks) b.removeAttribute('data-selected');
+        selectedBlocks.clear();
+      }
+    };
+
     // -- Drag-to-move + Copy/Delete --
     let dragging = false;
     let dragEl: HTMLElement | null = null;
@@ -671,16 +774,20 @@ export function HtmlSlideViewer({
         const action = actionBtn.getAttribute('data-block-action');
 
         if (action === 'delete') {
+          selectedBlocks.delete(block);
           block.remove();
           return;
         }
 
         if (action === 'copy') {
           const clone = block.cloneNode(true) as HTMLElement;
-          // Remove toolbar from clone (will be re-created by setupDragHandles)
+          // Remove toolbar & resize handles from clone (will be re-created by setupDragHandles)
           clone.querySelectorAll('[data-drag-toolbar]').forEach(el => el.remove());
+          clone.querySelectorAll('[data-resize]').forEach(el => el.remove());
           clone.removeAttribute('data-draggable');
           clone.removeAttribute('data-drag-pos');
+          clone.removeAttribute('data-hovered');
+          clone.removeAttribute('data-selected');
           // Offset the clone slightly so it's visually distinct
           const prevDx = parseFloat(clone.dataset.dragX || '0');
           const prevDy = parseFloat(clone.dataset.dragY || '0');
@@ -710,6 +817,10 @@ export function HtmlSlideViewer({
       startX = e.clientX;
       startY = e.clientY;
       dragEl.setAttribute('data-dragging', '');
+      // If dragging a selected block, also mark all selected as dragging
+      if (selectedBlocks.has(block)) {
+        for (const b of selectedBlocks) { if (b !== block) b.setAttribute('data-dragging', ''); }
+      }
       document.body.style.cursor = 'grabbing';
       document.body.style.userSelect = 'none';
     };
@@ -723,13 +834,110 @@ export function HtmlSlideViewer({
       startX = e.clientX;
       startY = e.clientY;
       applyDragTranslate(dragEl, dx, dy);
+      // Move all selected blocks together
+      if (selectedBlocks.has(dragEl)) {
+        for (const b of selectedBlocks) {
+          if (b !== dragEl) applyDragTranslate(b, dx, dy);
+        }
+      }
     };
 
     const onDragMouseUp = () => {
       if (!dragging || !dragEl) return;
       dragEl.removeAttribute('data-dragging');
+      if (selectedBlocks.has(dragEl)) {
+        for (const b of selectedBlocks) b.removeAttribute('data-dragging');
+      }
       dragging = false;
       dragEl = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    // -- Resize --
+    let resizing = false;
+    let resizeEl: HTMLElement | null = null;
+    let resizeDir = '';
+    let resizeStartX = 0;
+    let resizeStartY = 0;
+    let resizeInitW = 0;
+    let resizeInitH = 0;
+
+    const onResizeMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const handle = target.closest('[data-resize]') as HTMLElement | null;
+      if (!handle) return;
+      const block = handle.closest('[data-draggable]') as HTMLElement | null;
+      if (!block) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resizing = true;
+      resizeEl = block;
+      resizeDir = handle.getAttribute('data-resize') || 'se';
+      resizeStartX = e.clientX;
+      resizeStartY = e.clientY;
+      resizeInitW = block.offsetWidth;
+      resizeInitH = block.offsetHeight;
+      block.setAttribute('data-resizing', '');
+      document.body.style.cursor = `${resizeDir}-resize`;
+      document.body.style.userSelect = 'none';
+    };
+
+    const onResizeMouseMove = (e: MouseEvent) => {
+      if (!resizing || !resizeEl) return;
+      e.preventDefault();
+      const s = scaleRef.current;
+      const rawDx = (e.clientX - resizeStartX) / s;
+      const rawDy = (e.clientY - resizeStartY) / s;
+
+      let newW = resizeInitW;
+      let newH = resizeInitH;
+      let translateDx = 0;
+      let translateDy = 0;
+
+      const dir = resizeDir;
+      if (dir.includes('e')) { newW = Math.max(48, resizeInitW + rawDx); }
+      if (dir.includes('w')) { newW = Math.max(48, resizeInitW - rawDx); translateDx = resizeInitW - newW; }
+      if (dir.includes('s')) { newH = Math.max(24, resizeInitH + rawDy); }
+      if (dir.includes('n')) { newH = Math.max(24, resizeInitH - rawDy); translateDy = resizeInitH - newH; }
+
+      resizeEl.style.width = `${newW}px`;
+      resizeEl.style.height = `${newH}px`;
+      if (!resizeEl.dataset.resizeOrigW) {
+        resizeEl.dataset.resizeOrigW = String(resizeInitW);
+        resizeEl.dataset.resizeOrigH = String(resizeInitH);
+      }
+
+      // For n/w directions, shift position to keep opposite corner fixed
+      if (translateDx !== 0 || translateDy !== 0) {
+        const baseDx = parseFloat(resizeEl.dataset.dragX || '0');
+        const baseDy = parseFloat(resizeEl.dataset.dragY || '0');
+        const origTransform = resizeEl.dataset.dragOrigTransform || '';
+        const totalDx = baseDx + translateDx;
+        const totalDy = baseDy + translateDy;
+        resizeEl.style.transform = origTransform
+          ? `translate(${totalDx}px,${totalDy}px) ${origTransform}`
+          : `translate(${totalDx}px,${totalDy}px)`;
+        resizeEl.dataset.resizeTempDx = String(translateDx);
+        resizeEl.dataset.resizeTempDy = String(translateDy);
+      }
+    };
+
+    const onResizeMouseUp = () => {
+      if (!resizing || !resizeEl) return;
+      resizeEl.removeAttribute('data-resizing');
+      const tempDx = parseFloat(resizeEl.dataset.resizeTempDx || '0');
+      const tempDy = parseFloat(resizeEl.dataset.resizeTempDy || '0');
+      if (tempDx !== 0 || tempDy !== 0) {
+        const baseDx = parseFloat(resizeEl.dataset.dragX || '0');
+        const baseDy = parseFloat(resizeEl.dataset.dragY || '0');
+        resizeEl.dataset.dragX = String(baseDx + tempDx);
+        resizeEl.dataset.dragY = String(baseDy + tempDy);
+      }
+      delete resizeEl.dataset.resizeTempDx;
+      delete resizeEl.dataset.resizeTempDy;
+      resizing = false;
+      resizeEl = null;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
@@ -737,17 +945,31 @@ export function HtmlSlideViewer({
     const raf = requestAnimationFrame(setup);
     container.addEventListener('focusin', handleFocus);
     container.addEventListener('focusout', handleBlur);
+    container.addEventListener('mouseover', onHoverMove);
+    container.addEventListener('mouseleave', onHoverLeave);
+    container.addEventListener('click', onShiftClick);
     container.addEventListener('mousedown', onDragMouseDown);
+    container.addEventListener('mousedown', onResizeMouseDown);
     document.addEventListener('mousemove', onDragMouseMove);
+    document.addEventListener('mousemove', onResizeMouseMove);
     document.addEventListener('mouseup', onDragMouseUp);
+    document.addEventListener('mouseup', onResizeMouseUp);
+    document.addEventListener('keydown', onKeyDown);
 
     return () => {
       cancelAnimationFrame(raf);
       container.removeEventListener('focusin', handleFocus);
       container.removeEventListener('focusout', handleBlur);
+      container.removeEventListener('mouseover', onHoverMove);
+      container.removeEventListener('mouseleave', onHoverLeave);
+      container.removeEventListener('click', onShiftClick);
       container.removeEventListener('mousedown', onDragMouseDown);
+      container.removeEventListener('mousedown', onResizeMouseDown);
       document.removeEventListener('mousemove', onDragMouseMove);
+      document.removeEventListener('mousemove', onResizeMouseMove);
       document.removeEventListener('mouseup', onDragMouseUp);
+      document.removeEventListener('mouseup', onResizeMouseUp);
+      document.removeEventListener('keydown', onKeyDown);
       cleanupDragHandles(container);
     };
   }, [editing, activeSlideIndex, phase]);
@@ -1651,7 +1873,7 @@ export function HtmlSlideViewer({
                 <p className="text-center text-sm font-medium text-foreground">
                   {activeSlideIndex + 1}/{generatedSlides.length} - {activeSlide.title}
                   {activeSlide.fallback && <span className="ml-2 text-xs text-teal-500">(フォールバック)</span>}
-                  {editing && <span className="ml-2 text-xs text-teal-500">(編集中 - テキストをクリックして編集 / ⋮⋮ ドラッグで移動)</span>}
+                  {editing && <span className="ml-2 text-xs text-teal-500">(編集中 - テキスト編集 / ⋮⋮ 移動 / 角・辺リサイズ / Shift+クリックで複数選択)</span>}
                 </p>
               )}
 
