@@ -68,6 +68,159 @@ const FONT_PRESETS = [
   { label: 'モノスペース', css: 'Source Code Pro, Noto Sans Mono, monospace' },
 ] as const;
 
+// Drag-to-move CSS (injected during editing only)
+const DRAG_CSS = `
+[data-draggable]:hover > [data-drag-toolbar] { opacity:1 !important }
+[data-drag-toolbar] {
+  position:absolute; top:-6px; left:-6px; z-index:100;
+  display:flex; align-items:center; gap:2px;
+  opacity:0; transition:opacity .15s; pointer-events:auto;
+}
+[data-drag-toolbar] > [data-drag-handle] {
+  width:22px; height:22px;
+  background:rgba(255,255,255,0.95); border:1px solid rgba(0,0,0,0.12);
+  border-radius:5px; display:flex; align-items:center; justify-content:center;
+  cursor:grab; box-shadow:0 1px 3px rgba(0,0,0,0.1);
+}
+[data-drag-handle]:active { cursor:grabbing }
+[data-drag-toolbar] > [data-block-action] {
+  width:20px; height:20px;
+  background:rgba(255,255,255,0.95); border:1px solid rgba(0,0,0,0.10);
+  border-radius:4px; display:flex; align-items:center; justify-content:center;
+  cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.08);
+  transition:background .1s;
+}
+[data-block-action]:hover { background:rgba(230,230,230,0.95) !important }
+[data-block-action="delete"]:hover { background:rgba(254,202,202,0.95) !important }
+[data-dragging] {
+  outline:2px dashed rgba(20,184,166,0.5) !important;
+  outline-offset:2px !important; opacity:0.85;
+}`;
+
+const GRIP_SVG = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none"><circle cx="4" cy="3" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="3" r="1.5" fill="#9CA3AF"/><circle cx="4" cy="7" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="7" r="1.5" fill="#9CA3AF"/><circle cx="4" cy="11" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="11" r="1.5" fill="#9CA3AF"/></svg>`;
+const COPY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const TRASH_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#EF4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+
+// ============================================================
+// Drag helpers (module-level, no React state)
+// ============================================================
+
+const SKIP_TAGS = new Set(['script', 'style', 'br', 'hr']);
+
+function findDraggableBlocks(container: HTMLElement): HTMLElement[] {
+  // Find actual root slide div — skip <style> tags (e.g. __font-override)
+  let root: HTMLElement | null = null;
+  for (const child of Array.from(container.children) as HTMLElement[]) {
+    if (child.tagName.toLowerCase() !== 'style') { root = child; break; }
+  }
+  if (!root) return [];
+
+  const results: HTMLElement[] = [];
+
+  const collect = (parent: HTMLElement, depth: number) => {
+    if (depth > 3) return;
+    for (const child of Array.from(parent.children) as HTMLElement[]) {
+      const tag = child.tagName.toLowerCase();
+      if (SKIP_TAGS.has(tag)) continue;
+      if (tag === 'span' && !child.children.length) continue; // skip inline-only spans
+      if (child.offsetHeight < 24 || child.offsetWidth < 48) continue;
+
+      const cs = window.getComputedStyle(child);
+      const isLayout = cs.display === 'grid' || cs.display === 'flex';
+
+      // Recurse into: grid/flex containers, or large wrapper divs (>70% parent height)
+      const isLargeWrapper = child.children.length > 1 &&
+        child.offsetHeight > parent.offsetHeight * 0.7;
+
+      if ((isLayout || isLargeWrapper) && child.children.length > 1 && depth < 2) {
+        collect(child, depth + 1);
+        continue;
+      }
+
+      results.push(child);
+    }
+  };
+
+  collect(root, 0);
+  return results;
+}
+
+function applyDragTranslate(el: HTMLElement, dx: number, dy: number) {
+  const prevDx = parseFloat(el.dataset.dragX || '0');
+  const prevDy = parseFloat(el.dataset.dragY || '0');
+  const newDx = prevDx + dx;
+  const newDy = prevDy + dy;
+  el.dataset.dragX = String(newDx);
+  el.dataset.dragY = String(newDy);
+  if (!el.dataset.dragOrigTransform) {
+    el.dataset.dragOrigTransform = el.style.transform || '';
+  }
+  const orig = el.dataset.dragOrigTransform;
+  el.style.transform = orig
+    ? `translate(${newDx}px,${newDy}px) ${orig}`
+    : `translate(${newDx}px,${newDy}px)`;
+}
+
+function setupDragHandles(container: HTMLElement) {
+  // Inject drag CSS
+  const styleId = '__drag-styles';
+  if (!container.querySelector(`#${styleId}`)) {
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = DRAG_CSS;
+    container.prepend(style);
+  }
+
+  const blocks = findDraggableBlocks(container);
+
+  for (const el of blocks) {
+    if (el.hasAttribute('data-draggable')) continue;
+    el.setAttribute('data-draggable', '');
+
+    // Ensure positioning context for the toolbar
+    const cs = window.getComputedStyle(el);
+    if (cs.position === 'static') {
+      el.style.position = 'relative';
+      el.setAttribute('data-drag-pos', '');
+    }
+
+    // Toolbar: drag handle + copy + delete
+    const toolbar = document.createElement('div');
+    toolbar.setAttribute('data-drag-toolbar', '');
+
+    const grip = document.createElement('div');
+    grip.setAttribute('data-drag-handle', '');
+    grip.innerHTML = GRIP_SVG;
+
+    const copyBtn = document.createElement('div');
+    copyBtn.setAttribute('data-block-action', 'copy');
+    copyBtn.title = 'コピー';
+    copyBtn.innerHTML = COPY_SVG;
+
+    const delBtn = document.createElement('div');
+    delBtn.setAttribute('data-block-action', 'delete');
+    delBtn.title = '削除';
+    delBtn.innerHTML = TRASH_SVG;
+
+    toolbar.append(grip, copyBtn, delBtn);
+    el.prepend(toolbar);
+  }
+}
+
+function cleanupDragHandles(container: HTMLElement) {
+  container.querySelectorAll('[data-drag-toolbar]').forEach((el) => el.remove());
+  container.querySelectorAll('[data-draggable]').forEach((el) => {
+    el.removeAttribute('data-draggable');
+    el.removeAttribute('data-dragging');
+  });
+  container.querySelectorAll('[data-drag-pos]').forEach((el) => {
+    (el as HTMLElement).style.position = '';
+    el.removeAttribute('data-drag-pos');
+  });
+  const dragStyle = container.querySelector('#__drag-styles');
+  if (dragStyle) dragStyle.remove();
+}
+
 // ============================================================
 // Client-side MD parser
 // ============================================================
@@ -199,6 +352,7 @@ export function HtmlSlideViewer({
   const slideContainerRef = useRef<HTMLDivElement>(null);
   const mainAreaRef = useRef<HTMLDivElement>(null);
   const lastFocusedEditableRef = useRef<HTMLElement | null>(null);
+  const scaleRef = useRef(0.5);
   const [scale, setScale] = useState(0.5);
 
   // ============================================================
@@ -211,8 +365,9 @@ export function HtmlSlideViewer({
     const padding = 80;
     const availW = el.clientWidth - padding;
     const availH = el.clientHeight - padding;
-    const s = Math.min(availW / SLIDE_W, availH / SLIDE_H, 1);
-    setScale(Math.max(0.1, s));
+    const s = Math.max(0.1, Math.min(availW / SLIDE_W, availH / SLIDE_H, 1));
+    scaleRef.current = s;
+    setScale(s);
   }, []);
 
   useEffect(() => {
@@ -366,6 +521,7 @@ export function HtmlSlideViewer({
       setHasGeneratedOnce(false);
       setTemplateWarning(null);
       editFontRef.current = 'Noto Sans JP, Hiragino Sans, sans-serif';
+      document.getElementById('__font-override-head')?.remove();
       setPlanDiag(null);
       if (abortRef.current) {
         abortRef.current.abort();
@@ -474,8 +630,12 @@ export function HtmlSlideViewer({
         htmlEl.style.cursor = 'text';
         htmlEl.style.outline = 'none';
       });
+
+      // Set up drag handles on block elements
+      setupDragHandles(container);
     };
 
+    // -- contentEditable focus/blur --
     const handleFocus = (e: Event) => {
       const target = e.target as HTMLElement;
       if (target.contentEditable === 'true') {
@@ -492,14 +652,103 @@ export function HtmlSlideViewer({
       }
     };
 
+    // -- Drag-to-move + Copy/Delete --
+    let dragging = false;
+    let dragEl: HTMLElement | null = null;
+    let startX = 0;
+    let startY = 0;
+
+    const onDragMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+
+      // Copy / Delete action buttons
+      const actionBtn = target.closest('[data-block-action]') as HTMLElement | null;
+      if (actionBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const block = actionBtn.closest('[data-draggable]') as HTMLElement | null;
+        if (!block) return;
+        const action = actionBtn.getAttribute('data-block-action');
+
+        if (action === 'delete') {
+          block.remove();
+          return;
+        }
+
+        if (action === 'copy') {
+          const clone = block.cloneNode(true) as HTMLElement;
+          // Remove toolbar from clone (will be re-created by setupDragHandles)
+          clone.querySelectorAll('[data-drag-toolbar]').forEach(el => el.remove());
+          clone.removeAttribute('data-draggable');
+          clone.removeAttribute('data-drag-pos');
+          // Offset the clone slightly so it's visually distinct
+          const prevDx = parseFloat(clone.dataset.dragX || '0');
+          const prevDy = parseFloat(clone.dataset.dragY || '0');
+          clone.dataset.dragX = String(prevDx + 20);
+          clone.dataset.dragY = String(prevDy + 20);
+          const orig = clone.dataset.dragOrigTransform || '';
+          clone.style.transform = orig
+            ? `translate(${prevDx + 20}px,${prevDy + 20}px) ${orig}`
+            : `translate(${prevDx + 20}px,${prevDy + 20}px)`;
+          block.parentElement?.insertBefore(clone, block.nextSibling);
+          // Re-run drag handles to pick up the new element
+          setupDragHandles(container);
+          return;
+        }
+        return;
+      }
+
+      // Drag handle
+      const handle = target.closest('[data-drag-handle]');
+      if (!handle) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const block = handle.closest('[data-draggable]') as HTMLElement | null;
+      if (!block) return;
+      dragging = true;
+      dragEl = block;
+      startX = e.clientX;
+      startY = e.clientY;
+      dragEl.setAttribute('data-dragging', '');
+      document.body.style.cursor = 'grabbing';
+      document.body.style.userSelect = 'none';
+    };
+
+    const onDragMouseMove = (e: MouseEvent) => {
+      if (!dragging || !dragEl) return;
+      e.preventDefault();
+      const s = scaleRef.current;
+      const dx = (e.clientX - startX) / s;
+      const dy = (e.clientY - startY) / s;
+      startX = e.clientX;
+      startY = e.clientY;
+      applyDragTranslate(dragEl, dx, dy);
+    };
+
+    const onDragMouseUp = () => {
+      if (!dragging || !dragEl) return;
+      dragEl.removeAttribute('data-dragging');
+      dragging = false;
+      dragEl = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
     const raf = requestAnimationFrame(setup);
     container.addEventListener('focusin', handleFocus);
     container.addEventListener('focusout', handleBlur);
+    container.addEventListener('mousedown', onDragMouseDown);
+    document.addEventListener('mousemove', onDragMouseMove);
+    document.addEventListener('mouseup', onDragMouseUp);
 
     return () => {
       cancelAnimationFrame(raf);
       container.removeEventListener('focusin', handleFocus);
       container.removeEventListener('focusout', handleBlur);
+      container.removeEventListener('mousedown', onDragMouseDown);
+      document.removeEventListener('mousemove', onDragMouseMove);
+      document.removeEventListener('mouseup', onDragMouseUp);
+      cleanupDragHandles(container);
     };
   }, [editing, activeSlideIndex, phase]);
 
@@ -517,6 +766,9 @@ export function HtmlSlideViewer({
       (el as HTMLElement).style.cursor = '';
       (el as HTMLElement).style.outline = 'none';
     });
+
+    // Remove drag UI elements (keep position data: transform, data-drag-x/y)
+    cleanupDragHandles(container);
 
     const updatedHtml = container.innerHTML;
 
@@ -536,7 +788,11 @@ export function HtmlSlideViewer({
     persistCurrentSlide();
     setEditing(false);
 
-    // Apply font override to all slides on save
+    // Remove the head-injected font style (no longer needed after editing)
+    document.getElementById('__font-override-head')?.remove();
+    slideContainerRef.current?.removeAttribute('data-slide-editing');
+
+    // Apply font override to all slides on save (persisted in HTML)
     const cssFont = editFontRef.current;
     const overrideTag = `<style id="__font-override">* { font-family: ${cssFont} !important; }</style>`;
     setGeneratedSlides(prev =>
@@ -547,21 +803,26 @@ export function HtmlSlideViewer({
     );
   }, [persistCurrentSlide]);
 
-  // Global font change: pure DOM — zero React state updates to protect contentEditable
+  // Global font change: inject into <head> for reliable CSS application
+  // Uses document.head (not container) because <style> inside dangerouslySetInnerHTML
+  // can be unreliable across browsers. Scoped via data attribute on the container.
   const applyGlobalFont = useCallback((cssFont: string) => {
     editFontRef.current = cssFont;
 
     const container = slideContainerRef.current;
     if (!container) return;
 
-    const styleId = '__font-override';
-    let styleEl = container.querySelector(`#${styleId}`) as HTMLStyleElement | null;
+    // Mark container for CSS scoping
+    container.setAttribute('data-slide-editing', '');
+
+    const styleId = '__font-override-head';
+    let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
     if (!styleEl) {
       styleEl = document.createElement('style');
       styleEl.id = styleId;
-      container.prepend(styleEl);
+      document.head.appendChild(styleEl);
     }
-    styleEl.textContent = `* { font-family: ${cssFont} !important; }`;
+    styleEl.textContent = `[data-slide-editing] * { font-family: ${cssFont} !important; }`;
   }, []);
 
   // Per-element font size adjustment (uses last focused element ref)
@@ -1390,7 +1651,7 @@ export function HtmlSlideViewer({
                 <p className="text-center text-sm font-medium text-foreground">
                   {activeSlideIndex + 1}/{generatedSlides.length} - {activeSlide.title}
                   {activeSlide.fallback && <span className="ml-2 text-xs text-teal-500">(フォールバック)</span>}
-                  {editing && <span className="ml-2 text-xs text-teal-500">(編集中 - テキストをクリックして編集)</span>}
+                  {editing && <span className="ml-2 text-xs text-teal-500">(編集中 - テキストをクリックして編集 / ⋮⋮ ドラッグで移動)</span>}
                 </p>
               )}
 
