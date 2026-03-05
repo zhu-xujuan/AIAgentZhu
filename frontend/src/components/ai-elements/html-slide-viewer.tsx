@@ -96,6 +96,20 @@ const DRAG_CSS = `
 }
 [data-block-action]:hover { background:rgba(230,230,230,0.95) !important }
 [data-block-action="delete"]:hover { background:rgba(254,202,202,0.95) !important }
+[data-block-menu] {
+  position:absolute; top:24px; left:0; z-index:200;
+  background:rgba(255,255,255,0.98); border:1px solid rgba(0,0,0,0.12);
+  border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.15);
+  padding:3px; min-width:110px;
+}
+[data-block-menu] > [data-block-action] {
+  width:auto; height:auto; border:none; box-shadow:none;
+  display:flex; align-items:center; gap:6px; padding:5px 10px;
+  border-radius:4px; cursor:pointer; font-size:11px; white-space:nowrap;
+  background:transparent; color:#374151;
+}
+[data-block-menu] > [data-block-action]:hover { background:rgba(0,0,0,0.05) !important }
+[data-block-menu] > [data-block-action="delete"]:hover { background:rgba(254,202,202,0.5) !important }
 [data-dragging] {
   outline:2px dashed rgba(20,184,166,0.5) !important;
   outline-offset:2px !important; opacity:0.85;
@@ -124,6 +138,9 @@ const DRAG_CSS = `
 const GRIP_SVG = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none"><circle cx="4" cy="3" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="3" r="1.5" fill="#9CA3AF"/><circle cx="4" cy="7" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="7" r="1.5" fill="#9CA3AF"/><circle cx="4" cy="11" r="1.5" fill="#9CA3AF"/><circle cx="10" cy="11" r="1.5" fill="#9CA3AF"/></svg>`;
 const COPY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const TRASH_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#EF4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+const REPLACE_IMG_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`;
+const BG_REPLACE_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#0D9488" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M2 17l5-5 4 4 3-3 8 8"/><circle cx="8" cy="8" r="2"/></svg>`;
+const MENU_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#6B7280"><circle cx="12" cy="5" r="2.5"/><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="19" r="2.5"/></svg>`;
 
 // ============================================================
 // Drag helpers (module-level, no React state)
@@ -163,10 +180,14 @@ function findDraggableBlocks(container: HTMLElement): HTMLElement[] {
       const tag = child.tagName.toLowerCase();
       if (SKIP_TAGS.has(tag)) continue;
       if (isInjected(child)) continue;
-      if (child.offsetHeight < 20 || child.offsetWidth < 40) continue;
+      // Use relaxed size threshold for images/icons (allow small icons ≥ 8px)
+      const isMedia = LEAF_TAGS.has(tag);
+      const minH = isMedia ? 8 : 20;
+      const minW = isMedia ? 8 : 40;
+      if (child.offsetHeight < minH || child.offsetWidth < minW) continue;
 
       // Tables, SVGs, images — always leaf blocks (no recursion)
-      if (LEAF_TAGS.has(tag)) {
+      if (isMedia) {
         results.push(child);
         continue;
       }
@@ -219,8 +240,47 @@ function setupDragHandles(container: HTMLElement) {
 
   const blocks = findDraggableBlocks(container);
 
-  for (const el of blocks) {
+  for (let el of blocks) {
     if (el.hasAttribute('data-draggable')) continue;
+
+    // Void elements (img, canvas, video, iframe) can't hold children.
+    // Wrap them in a <div> so toolbar + resize handles can be rendered.
+    const VOID_DRAG = new Set(['img', 'svg', 'canvas', 'video', 'iframe']);
+    const rawTag = el.tagName.toLowerCase();
+    if (VOID_DRAG.has(rawTag)) {
+      const wrapper = document.createElement('div');
+      wrapper.setAttribute('data-img-wrapper', '');
+      // Copy positioning & size from the original element
+      const cs = window.getComputedStyle(el);
+      wrapper.style.position = cs.position === 'static' ? 'relative' : cs.position;
+      wrapper.style.top = el.style.top || '';
+      wrapper.style.right = el.style.right || '';
+      wrapper.style.left = el.style.left || '';
+      wrapper.style.bottom = el.style.bottom || '';
+      wrapper.style.width = el.style.width || `${el.offsetWidth}px`;
+      wrapper.style.height = el.style.height || `${el.offsetHeight}px`;
+      wrapper.style.zIndex = el.style.zIndex || '';
+      wrapper.style.display = 'inline-block';
+      // Transfer transform / drag data
+      if (el.style.transform) { wrapper.style.transform = el.style.transform; el.style.transform = ''; }
+      if (el.dataset.dragX) { wrapper.dataset.dragX = el.dataset.dragX; delete el.dataset.dragX; }
+      if (el.dataset.dragY) { wrapper.dataset.dragY = el.dataset.dragY; delete el.dataset.dragY; }
+      if (el.dataset.dragOrigTransform) { wrapper.dataset.dragOrigTransform = el.dataset.dragOrigTransform; delete el.dataset.dragOrigTransform; }
+      // Replace element with wrapper, put element inside
+      el.replaceWith(wrapper);
+      el.style.position = '';
+      el.style.top = '';
+      el.style.right = '';
+      el.style.left = '';
+      el.style.bottom = '';
+      el.style.zIndex = '';
+      el.style.width = '100%';
+      el.style.height = '100%';
+      el.style.display = 'block';
+      wrapper.appendChild(el);
+      el = wrapper; // toolbar/resize go on the wrapper
+    }
+
     el.setAttribute('data-draggable', '');
 
     // Ensure positioning context for the toolbar
@@ -230,7 +290,18 @@ function setupDragHandles(container: HTMLElement) {
       el.setAttribute('data-drag-pos', '');
     }
 
-    // Toolbar: drag handle + copy + delete (inline position:absolute for safety in grid/flex parents)
+    // Detect what actions this block supports
+    const hasContentMedia = (() => {
+      if (el.hasAttribute('data-img-wrapper')) return true;
+      // Check for img/svg in non-injected children (toolbar not prepended yet)
+      return !!(el.querySelector('img') || el.querySelector('svg'));
+    })();
+    const isSlideSize = el.offsetWidth >= SLIDE_W * 0.9 && el.offsetHeight >= SLIDE_H * 0.9;
+    // Store capabilities on the block for the menu handler
+    if (hasContentMedia) el.setAttribute('data-can-replace', '');
+    if (isSlideSize) el.setAttribute('data-can-bg', '');
+
+    // Toolbar: drag handle + ⋮ menu button (compact: only 2 icons)
     const toolbar = document.createElement('div');
     toolbar.setAttribute('data-drag-toolbar', '');
     toolbar.style.position = 'absolute';
@@ -239,17 +310,13 @@ function setupDragHandles(container: HTMLElement) {
     grip.setAttribute('data-drag-handle', '');
     grip.innerHTML = GRIP_SVG;
 
-    const copyBtn = document.createElement('div');
-    copyBtn.setAttribute('data-block-action', 'copy');
-    copyBtn.title = 'コピー';
-    copyBtn.innerHTML = COPY_SVG;
+    const menuBtn = document.createElement('div');
+    menuBtn.setAttribute('data-block-action', 'menu');
+    menuBtn.title = 'メニュー';
+    menuBtn.innerHTML = MENU_SVG;
 
-    const delBtn = document.createElement('div');
-    delBtn.setAttribute('data-block-action', 'delete');
-    delBtn.title = '削除';
-    delBtn.innerHTML = TRASH_SVG;
+    toolbar.append(grip, menuBtn);
 
-    toolbar.append(grip, copyBtn, delBtn);
     el.prepend(toolbar);
 
     // Resize handles: 4 corners + 4 edges
@@ -264,17 +331,42 @@ function setupDragHandles(container: HTMLElement) {
 function cleanupDragHandles(container: HTMLElement) {
   container.querySelectorAll('[data-drag-toolbar]').forEach((el) => el.remove());
   container.querySelectorAll('[data-resize]').forEach((el) => el.remove());
+  container.querySelectorAll('[data-block-menu]').forEach((el) => el.remove());
   container.querySelectorAll('[data-draggable]').forEach((el) => {
     el.removeAttribute('data-draggable');
     el.removeAttribute('data-dragging');
     el.removeAttribute('data-resizing');
     el.removeAttribute('data-hovered');
     el.removeAttribute('data-selected');
+    el.removeAttribute('data-can-replace');
+    el.removeAttribute('data-can-bg');
     // Clean up temporary resize tracking attributes (keep width/height/transform inline styles)
     (el as HTMLElement).removeAttribute('data-resize-orig-w');
     (el as HTMLElement).removeAttribute('data-resize-orig-h');
     (el as HTMLElement).removeAttribute('data-resize-temp-dx');
     (el as HTMLElement).removeAttribute('data-resize-temp-dy');
+  });
+  // Unwrap img wrappers: transfer wrapper's position/size/transform back to the child element
+  container.querySelectorAll('[data-img-wrapper]').forEach((wrapper) => {
+    const w = wrapper as HTMLElement;
+    const child = w.querySelector('img, svg, canvas, video, iframe') as HTMLElement | null;
+    if (child) {
+      child.style.position = w.style.position || '';
+      child.style.top = w.style.top || '';
+      child.style.right = w.style.right || '';
+      child.style.left = w.style.left || '';
+      child.style.bottom = w.style.bottom || '';
+      child.style.width = w.style.width || '';
+      child.style.height = w.style.height || '';
+      child.style.zIndex = w.style.zIndex || '';
+      child.style.transform = w.style.transform || '';
+      child.style.display = '';
+      // Transfer drag data
+      if (w.dataset.dragX) { child.dataset.dragX = w.dataset.dragX; }
+      if (w.dataset.dragY) { child.dataset.dragY = w.dataset.dragY; }
+      if (w.dataset.dragOrigTransform) { child.dataset.dragOrigTransform = w.dataset.dragOrigTransform; }
+      w.replaceWith(child);
+    }
   });
   container.querySelectorAll('[data-drag-pos]').forEach((el) => {
     (el as HTMLElement).style.position = '';
@@ -764,7 +856,7 @@ export function HtmlSlideViewer({
     const onDragMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
 
-      // Copy / Delete action buttons
+      // Action buttons (direct or from popup menu)
       const actionBtn = target.closest('[data-block-action]') as HTMLElement | null;
       if (actionBtn) {
         e.preventDefault();
@@ -773,9 +865,133 @@ export function HtmlSlideViewer({
         if (!block) return;
         const action = actionBtn.getAttribute('data-block-action');
 
+        // Close any open popup menu (except when opening one)
+        if (action !== 'menu') {
+          container.querySelectorAll('[data-block-menu]').forEach(m => m.remove());
+        }
+
+        // ⋮ Menu toggle
+        if (action === 'menu') {
+          const toolbar = actionBtn.closest('[data-drag-toolbar]') as HTMLElement;
+          const existing = toolbar?.querySelector('[data-block-menu]');
+          // Close all menus first
+          container.querySelectorAll('[data-block-menu]').forEach(m => m.remove());
+          if (existing) return; // was open, now closed (toggle)
+
+          const menu = document.createElement('div');
+          menu.setAttribute('data-block-menu', '');
+
+          // Copy
+          const copyItem = document.createElement('div');
+          copyItem.setAttribute('data-block-action', 'copy');
+          copyItem.innerHTML = `${COPY_SVG}<span>コピー</span>`;
+          menu.append(copyItem);
+
+          // Delete
+          const delItem = document.createElement('div');
+          delItem.setAttribute('data-block-action', 'delete');
+          delItem.innerHTML = `${TRASH_SVG}<span>削除</span>`;
+          menu.append(delItem);
+
+          // Replace image (if block has media content or is non-text icon group)
+          if (block.hasAttribute('data-can-replace')) {
+            const replItem = document.createElement('div');
+            replItem.setAttribute('data-block-action', 'replace-image');
+            replItem.innerHTML = `${REPLACE_IMG_SVG}<span>アイコン入れ替え</span>`;
+            menu.append(replItem);
+          }
+
+          // Background replace (if slide-sized)
+          if (block.hasAttribute('data-can-bg')) {
+            const bgItem = document.createElement('div');
+            bgItem.setAttribute('data-block-action', 'replace-bg');
+            bgItem.innerHTML = `${BG_REPLACE_SVG}<span>背景入れ替え</span>`;
+            menu.append(bgItem);
+          }
+
+          toolbar.append(menu);
+
+          // Close menu on click outside
+          const closeMenu = (ev: MouseEvent) => {
+            if (!menu.contains(ev.target as Node)) {
+              menu.remove();
+              document.removeEventListener('mousedown', closeMenu, true);
+            }
+          };
+          setTimeout(() => document.addEventListener('mousedown', closeMenu, true), 0);
+          return;
+        }
+
         if (action === 'delete') {
           selectedBlocks.delete(block);
           block.remove();
+          return;
+        }
+
+        if (action === 'replace-image') {
+          // Find the actual img/svg target inside the block, skipping toolbar injections
+          let imgTarget: HTMLElement | null = null;
+          const candidates = block.querySelectorAll('img, svg');
+          for (const m of Array.from(candidates)) {
+            if (m.closest('[data-drag-toolbar]') || m.closest('[data-block-action]') || m.closest('[data-block-menu]')) continue;
+            imgTarget = m as HTMLElement;
+            break;
+          }
+          // If no img/svg found, the block itself is the target (non-text icon group)
+          const replaceTarget = imgTarget || block;
+          const targetRect = replaceTarget.getBoundingClientRect();
+
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = 'image/svg+xml,image/png,image/jpeg,image/gif,image/webp';
+          input.onchange = () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              const dataUrl = reader.result as string;
+              const tTag = replaceTarget.tagName.toLowerCase();
+              if (tTag === 'img') {
+                // Swap src, keep size
+                (replaceTarget as HTMLImageElement).src = dataUrl;
+              } else {
+                // Replace any element (svg, div, etc.) with an <img>
+                const newImg = document.createElement('img');
+                newImg.src = dataUrl;
+                newImg.style.width = replaceTarget.style.width || `${targetRect.width}px`;
+                newImg.style.height = replaceTarget.style.height || `${targetRect.height}px`;
+                replaceTarget.replaceWith(newImg);
+              }
+              // Rebuild drag handles
+              requestAnimationFrame(() => {
+                cleanupDragHandles(container);
+                setupDragHandles(container);
+              });
+            };
+            reader.readAsDataURL(file);
+          };
+          input.click();
+          return;
+        }
+
+        if (action === 'replace-bg') {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = 'image/svg+xml,image/png,image/jpeg,image/gif,image/webp';
+          input.onchange = () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              const dataUrl = reader.result as string;
+              block.style.backgroundImage = `url(${dataUrl})`;
+              block.style.backgroundSize = 'cover';
+              block.style.backgroundPosition = 'center';
+              block.style.backgroundRepeat = 'no-repeat';
+            };
+            reader.readAsDataURL(file);
+          };
+          input.click();
           return;
         }
 
@@ -1055,6 +1271,72 @@ export function HtmlSlideViewer({
     const current = parseFloat(computed.fontSize) || 16;
     const next = Math.max(8, Math.min(120, current + delta));
     target.style.fontSize = `${next}px`;
+  }, []);
+
+  // ============================================================
+  // Insert uploaded image/icon into current slide (top-right)
+  // ============================================================
+
+  const insertUploadedImage = useCallback(() => {
+    const container = slideContainerRef.current;
+    if (!container) return;
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/svg+xml,image/png,image/jpeg,image/gif,image/webp';
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const tmpImg = new window.Image();
+        tmpImg.onload = () => {
+          let w = tmpImg.naturalWidth;
+          let h = tmpImg.naturalHeight;
+          const maxW = SLIDE_W / 2;
+          const maxH = SLIDE_H / 2;
+          if (w > maxW || h > maxH) {
+            const scale = Math.min(maxW / w, maxH / h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          // Find the root slide element (skip <style> and drag injections)
+          let root: HTMLElement | null = null;
+          for (const child of Array.from(container.children) as HTMLElement[]) {
+            const tag = child.tagName.toLowerCase();
+            if (tag === 'style' || child.hasAttribute('data-drag-toolbar') || child.hasAttribute('data-resize')) continue;
+            root = child;
+            break;
+          }
+          if (!root) return;
+
+          const img = document.createElement('img');
+          img.style.position = 'absolute';
+          img.style.top = '20px';
+          img.style.right = '20px';
+          img.style.width = `${w}px`;
+          img.style.height = `${h}px`;
+          img.style.zIndex = '10';
+          // Ensure root has positioning context
+          const rootPos = window.getComputedStyle(root).position;
+          if (rootPos === 'static') root.style.position = 'relative';
+          root.appendChild(img);
+          img.src = dataUrl;
+          // Wait for image to load, then re-init drag handles (wrapper needs layout dimensions)
+          const reinit = () => {
+            cleanupDragHandles(container);
+            setupDragHandles(container);
+          };
+          img.onload = () => requestAnimationFrame(reinit);
+          // Fallback if image loads from cache synchronously
+          if (img.complete) requestAnimationFrame(reinit);
+        };
+        tmpImg.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
   }, []);
 
   // ============================================================
@@ -1389,6 +1671,13 @@ export function HtmlSlideViewer({
                   </button>
                 </div>
 
+                <button
+                  onClick={insertUploadedImage}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-violet-100 text-violet-700 border border-violet-300 hover:bg-violet-200 transition-colors"
+                >
+                  <Image className="w-3.5 h-3.5" />
+                  アイコン追加
+                </button>
                 <button
                   onClick={redrawCurrentSlide}
                   disabled={redrawing}
