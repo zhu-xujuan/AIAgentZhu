@@ -18,7 +18,7 @@ export default function RootLayout({
       <body className="h-full flex flex-col antialiased">
         <Providers>
           <Navigation />
-          <main className="flex-1 overflow-hidden w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <main className="flex-1 overflow-auto w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
             {children}
           </main>
         </Providers>
