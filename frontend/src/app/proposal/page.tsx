@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import {
   Check,
@@ -28,95 +28,25 @@ import {
   FormInput,
   Globe,
 } from "lucide-react";
-
-// Types
-type DataSource = "salesforce" | "kintone" | "file" | "manual";
-
-interface SFCredentials {
-  username: string;
-  password: string;
-  securityToken: string;
-  loginUrl: string;
-}
-interface KintoneCredentials {
-  subdomain: string;
-  apiToken: string;
-  appId: string;
-}
-interface ManualDealInput {
-  companyName: string;
-  industry: string;
-  dealName: string;
-  amount: string;
-  stage: string;
-  closeDate: string;
-  challenges: string;
-  description: string;
-  contactName: string;
-  contactRole: string;
-}
-interface FileDealRecord {
-  companyName: string;
-  dealName: string;
-  amount: number;
-  stage: string;
-  closeDate: string;
-  industry: string;
-  description: string;
-  contacts: string;
-}
-
-interface OpportunityListItem {
-  Id: string;
-  Name: string;
-  Amount: number;
-  StageName: string;
-  CloseDate: string;
-  AccountName: string;
-}
-interface ScenarioResult {
-  label: string;
-  probability: number;
-  expectedRevenue: number;
-  timeline: string;
-  conditions: string[];
-}
-interface ServiceRecommendation {
-  service: string;
-  relevance: "primary" | "secondary" | "optional";
-  reason: string;
-  features: string[];
-}
-interface AnalysisRationale {
-  customerChallenges: string[];
-  serviceRecommendations: ServiceRecommendation[];
-  combinedSolution: string;
-  existingProposalHints: string[];
-}
-interface AnalysisResult {
-  winProbability: number;
-  dealHealthScore: number;
-  activityScore: number;
-  engagementLevel: string;
-  proposalReadiness: number;
-  scenarios: {
-    optimistic: ScenarioResult;
-    base: ScenarioResult;
-    pessimistic: ScenarioResult;
-  };
-  keyDrivers: string[];
-  riskFactors: string[];
-  recommendedActions: string[];
-  rationale: AnalysisRationale;
-}
-interface SFData {
-  account: { Name: string; Industry: string; [k: string]: unknown };
-  opportunity: { Name: string; Amount: number; [k: string]: unknown };
-  activities: unknown[];
-  contacts: unknown[];
-}
-
-type AIProvider = "gemini" | "claude" | "chatgpt";
+import type {
+  DataSource,
+  SFCredentials,
+  KintoneCredentials,
+  ManualDealInput,
+  FileDealRecord,
+  OpportunityListItem,
+  ScenarioResult,
+  AnalysisResult,
+  SFData,
+  AIProvider,
+  Step,
+} from "./types";
+import {
+  MOCK_OPPORTUNITIES,
+  MOCK_SF_DATA_MAP,
+  MOCK_FILE_DEALS,
+  getMockAnalysis,
+} from "./mock-data";
 const AI_PROVIDERS: { id: AIProvider; label: string; placeholder: string }[] = [
   { id: "gemini", label: "Gemini", placeholder: "AIzaSy..." },
   { id: "claude", label: "Claude", placeholder: "sk-ant-..." },
@@ -155,14 +85,13 @@ const DATA_SOURCES: {
   },
 ];
 
-type Step = "source" | "select" | "analyze" | "generate";
-
 const STEPS: { id: Step; label: string }[] = [
   { id: "source", label: "データソース" },
   { id: "select", label: "案件選択" },
   { id: "analyze", label: "分析" },
   { id: "generate", label: "提案書生成" },
 ];
+
 
 function StepIndicator({ current }: { current: Step }) {
   const idx = STEPS.findIndex((s) => s.id === current);
@@ -284,6 +213,7 @@ export default function ProposalPage() {
     apiToken: "",
     appId: "",
   });
+  const [kintoneEnvConfigured, setKintoneEnvConfigured] = useState(false);
 
   // File upload
   const [fileDeals, setFileDeals] = useState<FileDealRecord[]>([]);
@@ -306,7 +236,6 @@ export default function ProposalPage() {
 
   // AI
   const [aiProvider, setAiProvider] = useState<AIProvider>("gemini");
-  const [aiApiKey, setAiApiKey] = useState("");
 
   // Shared state
   const [opportunities, setOpportunities] = useState<OpportunityListItem[]>([]);
@@ -330,6 +259,23 @@ export default function ProposalPage() {
   const [missingServices, setMissingServices] = useState<MissingService[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
+  // Load Kintone env config on mount
+  useEffect(() => {
+    fetch("/api/proposal/kintone-data")
+      .then((res) => res.json())
+      .then((cfg) => {
+        if (cfg.configured) {
+          setKintoneEnvConfigured(true);
+          setKintone((prev) => ({
+            subdomain: prev.subdomain || cfg.subdomain || "",
+            apiToken: prev.apiToken || "(環境変数から設定済み)",
+            appId: prev.appId || cfg.appId || "",
+          }));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Refresh data from Salesforce or Kintone (re-fetch latest)
   const handleRefreshData = useCallback(async () => {
     if (refreshing) return;
@@ -352,41 +298,29 @@ export default function ProposalPage() {
         setSfData(sfJson.data);
         try {
           localStorage.setItem("sf_proposal_data", JSON.stringify(sfJson.data));
-        } catch { /* ignore */ }
+        } catch {}
       } else if (dataSource === "kintone" && selectedOppId) {
-        const res = await fetch(
-          `https://${kintone.subdomain}.cybozu.com/k/v1/record.json?app=${kintone.appId}&id=${selectedOppId}`,
-          { headers: { "X-Cybozu-API-Token": kintone.apiToken } },
-        );
-        if (!res.ok) throw new Error("Kintoneレコード再取得失敗");
+        const credentials = kintoneEnvConfigured
+          ? undefined
+          : { subdomain: kintone.subdomain, apiToken: kintone.apiToken, appId: kintone.appId };
+        const res = await fetch("/api/proposal/kintone-data", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "fetch", credentials, recordId: selectedOppId }),
+        });
         const json = await res.json();
-        const r = json.record || {};
-        const data: SFData = {
-          account: {
-            Name: r["会社名"]?.value || r["顧客名"]?.value || "不明",
-            Industry: r["業種"]?.value || r["業界"]?.value || "",
-          },
-          opportunity: {
-            Name: r["案件名"]?.value || r["商談名"]?.value || "不明",
-            Amount: parseFloat(r["金額"]?.value || r["予算"]?.value || "0") || 0,
-            StageName: r["ステージ"]?.value || r["状況"]?.value || "",
-            CloseDate: r["完了予定日"]?.value || r["期限"]?.value || "",
-            Description: r["概要"]?.value || r["説明"]?.value || r["メモ"]?.value || "",
-          },
-          activities: [],
-          contacts: r["担当者"]?.value ? [{ Name: r["担当者"].value }] : [],
-        };
-        setSfData(data);
+        if (!res.ok) throw new Error(json.error || "Kintoneレコード再取得失敗");
+        setSfData(json.data);
         try {
-          localStorage.setItem("sf_proposal_data", JSON.stringify(data));
-        } catch { /* ignore */ }
+          localStorage.setItem("sf_proposal_data", JSON.stringify(json.data));
+        } catch {}
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "データ再取得失敗");
     } finally {
       setRefreshing(false);
     }
-  }, [refreshing, dataSource, selectedOppId, creds, sfObjectType, kintone]);
+  }, [refreshing, dataSource, selectedOppId, creds, sfObjectType, kintone, kintoneEnvConfigured]);
 
   const handleReviseRationale = useCallback(async () => {
     if (!analysis?.rationale || !feedback.trim()) return;
@@ -397,17 +331,30 @@ export default function ProposalPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          currentRationale: analysis.rationale,
+          currentAnalysis: analysis,
           feedback: feedback.trim(),
           aiProvider,
-          aiApiKey: aiApiKey || undefined,
         }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "修正失敗");
-      setAnalysis((prev) =>
-        prev ? { ...prev, rationale: json.rationale } : prev,
-      );
+      setAnalysis((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev, rationale: json.rationale };
+        if (json.analysisUpdates) {
+          const u = json.analysisUpdates;
+          if (u.winProbability != null) updated.winProbability = u.winProbability;
+          if (u.dealHealthScore != null) updated.dealHealthScore = u.dealHealthScore;
+          if (u.activityScore != null) updated.activityScore = u.activityScore;
+          if (u.engagementLevel != null) updated.engagementLevel = u.engagementLevel;
+          if (u.proposalReadiness != null) updated.proposalReadiness = u.proposalReadiness;
+          if (u.keyDrivers) updated.keyDrivers = u.keyDrivers;
+          if (u.riskFactors) updated.riskFactors = u.riskFactors;
+          if (u.recommendedActions) updated.recommendedActions = u.recommendedActions;
+          if (u.scenarios) updated.scenarios = u.scenarios;
+        }
+        return updated;
+      });
       setFeedback("");
       setShowFeedback(false);
     } catch (e: unknown) {
@@ -415,13 +362,21 @@ export default function ProposalPage() {
     } finally {
       setRevising(false);
     }
-  }, [analysis, feedback, aiProvider, aiApiKey]);
+  }, [analysis, feedback, aiProvider]);
 
   // --- Salesforce flow ---
   const handleFetchOpportunities = useCallback(async () => {
     setError("");
     setLoading(true);
     try {
+      // --- MOCK: Salesforce商談一覧をダミーデータで返す ---
+      await new Promise((r) => setTimeout(r, 500));
+      setOpportunities(MOCK_OPPORTUNITIES);
+      setSfObjectType("Opportunity");
+      setStep("select");
+      // --- END MOCK ---
+
+      /* --- ORIGINAL: 本番接続時はこちらを使用 ---
       const res = await fetch("/api/proposal/sf-data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -432,6 +387,7 @@ export default function ProposalPage() {
       setOpportunities(json.opportunities);
       setSfObjectType(json.objectType || "Opportunity");
       setStep("select");
+      --- END ORIGINAL --- */
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "接続失敗");
     } finally {
@@ -447,6 +403,18 @@ export default function ProposalPage() {
     setError("");
     setLoading(true);
     try {
+      // --- MOCK: ダミーデータで商談詳細＋分析結果を返す ---
+      await new Promise((r) => setTimeout(r, 800));
+      const mockData = MOCK_SF_DATA_MAP[selectedOppId] || Object.values(MOCK_SF_DATA_MAP)[0];
+      setSfData(mockData);
+      try {
+        localStorage.setItem("sf_proposal_data", JSON.stringify(mockData));
+      } catch { /* ignore */ }
+      setAnalysis(getMockAnalysis(selectedOppId, mockData));
+      setStep("analyze");
+      // --- END MOCK ---
+
+      /* --- ORIGINAL: 本番接続時はこちらを使用 ---
       const sfRes = await fetch("/api/proposal/sf-data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -461,13 +429,8 @@ export default function ProposalPage() {
       if (!sfRes.ok) throw new Error(sfJson.error || "データ取得失敗");
       setSfData(sfJson.data);
       try {
-        localStorage.setItem(
-          "sf_proposal_data",
-          JSON.stringify(sfJson.data),
-        );
-      } catch {
-        /* ignore */
-      }
+        localStorage.setItem("sf_proposal_data", JSON.stringify(sfJson.data));
+      } catch {}
 
       const anaRes = await fetch("/api/proposal/analyze", {
         method: "POST",
@@ -475,19 +438,20 @@ export default function ProposalPage() {
         body: JSON.stringify({
           data: sfJson.data,
           aiProvider,
-          aiApiKey: aiApiKey || undefined,
+          aiApiKey: undefined,
         }),
       });
       const anaJson = await anaRes.json();
       if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
       setAnalysis(anaJson.analysis);
       setStep("analyze");
+      --- END ORIGINAL --- */
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "データ取得失敗");
     } finally {
       setLoading(false);
     }
-  }, [creds, selectedOppId, sfObjectType, aiProvider, aiApiKey]);
+  }, [creds, selectedOppId, sfObjectType, aiProvider]);
 
   // --- File upload flow ---
   const handleFileUpload = useCallback(
@@ -497,6 +461,14 @@ export default function ProposalPage() {
       setFileParsing(true);
       setError("");
       try {
+        // --- MOCK: ファイル解析をダミーデータで返す ---
+        await new Promise((r) => setTimeout(r, 600));
+        setFileDeals(MOCK_FILE_DEALS);
+        setFileName(file.name);
+        setStep("select");
+        // --- END MOCK ---
+
+        /* --- ORIGINAL: 本番接続時はこちらを使用 ---
         const formData = new FormData();
         formData.append("file", file);
         const res = await fetch("/api/proposal/parse-file", {
@@ -508,7 +480,6 @@ export default function ProposalPage() {
         setFileDeals(json.deals || []);
         setFileName(json.fileName || file.name);
         if (json.deals && json.deals.length > 0) {
-          // If single deal, auto-select and go to analyze
           if (json.deals.length === 1) {
             await analyzeFromDeal(json.deals[0]);
           } else {
@@ -517,6 +488,7 @@ export default function ProposalPage() {
         } else {
           setError("ファイルから案件データを抽出できませんでした");
         }
+        --- END ORIGINAL --- */
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "ファイル解析失敗");
       } finally {
@@ -524,7 +496,7 @@ export default function ProposalPage() {
         e.target.value = "";
       }
     },
-    [aiProvider, aiApiKey],
+    [aiProvider],
   );
 
   // --- Manual input flow ---
@@ -548,63 +520,35 @@ export default function ProposalPage() {
         .join(" / "),
     };
     await analyzeFromDeal(deal);
-  }, [manualDeal, aiProvider, aiApiKey]);
+  }, [manualDeal, aiProvider]);
 
   // --- Kintone flow ---
   const handleKintoneConnect = useCallback(async () => {
-    if (!kintone.subdomain || !kintone.apiToken || !kintone.appId) {
+    if (!kintoneEnvConfigured && (!kintone.subdomain || !kintone.apiToken || !kintone.appId)) {
       setError("Kintoneのサブドメイン、APIトークン、アプリIDを入力してください");
       return;
     }
     setError("");
     setLoading(true);
     try {
-      const res = await fetch(
-        `https://${kintone.subdomain}.cybozu.com/k/v1/records.json?app=${kintone.appId}`,
-        {
-          headers: { "X-Cybozu-API-Token": kintone.apiToken },
-        },
-      );
-      if (!res.ok) {
-        throw new Error("Kintone接続失敗。サブドメイン、APIトークン、アプリIDを確認してください。");
-      }
+      const credentials = kintoneEnvConfigured
+        ? undefined
+        : { subdomain: kintone.subdomain, apiToken: kintone.apiToken, appId: kintone.appId };
+      const res = await fetch("/api/proposal/kintone-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "list", credentials }),
+      });
       const json = await res.json();
-      const records = json.records || [];
-      // Convert Kintone records to OpportunityListItem format
-      const deals: OpportunityListItem[] = records.slice(0, 50).map(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (r: any, i: number) => ({
-          Id: r.$id?.value || String(i),
-          Name:
-            r["案件名"]?.value ||
-            r["商談名"]?.value ||
-            r["件名"]?.value ||
-            `レコード ${i + 1}`,
-          Amount: parseFloat(r["金額"]?.value || r["予算"]?.value || "0") || 0,
-          StageName:
-            r["ステージ"]?.value ||
-            r["状況"]?.value ||
-            r["フェーズ"]?.value ||
-            "",
-          CloseDate:
-            r["完了予定日"]?.value ||
-            r["期限"]?.value ||
-            "",
-          AccountName:
-            r["会社名"]?.value ||
-            r["顧客名"]?.value ||
-            r["取引先"]?.value ||
-            "",
-        }),
-      );
-      setOpportunities(deals);
+      if (!res.ok) throw new Error(json.error || "Kintone接続失敗");
+      setOpportunities(json.opportunities);
       setStep("select");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Kintone接続失敗");
     } finally {
       setLoading(false);
     }
-  }, [kintone]);
+  }, [kintone, kintoneEnvConfigured]);
 
   // --- Kintone: select and analyze ---
   const handleKintoneAnalyze = useCallback(async () => {
@@ -615,50 +559,26 @@ export default function ProposalPage() {
     setError("");
     setLoading(true);
     try {
-      const res = await fetch(
-        `https://${kintone.subdomain}.cybozu.com/k/v1/record.json?app=${kintone.appId}&id=${selectedOppId}`,
-        {
-          headers: { "X-Cybozu-API-Token": kintone.apiToken },
-        },
-      );
-      if (!res.ok) throw new Error("レコード取得失敗");
+      const credentials = kintoneEnvConfigured
+        ? undefined
+        : { subdomain: kintone.subdomain, apiToken: kintone.apiToken, appId: kintone.appId };
+      const res = await fetch("/api/proposal/kintone-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "fetch", credentials, recordId: selectedOppId }),
+      });
       const json = await res.json();
-      const r = json.record || {};
-
-      // Convert to SFData format
-      const data: SFData = {
-        account: {
-          Name: r["会社名"]?.value || r["顧客名"]?.value || "不明",
-          Industry: r["業種"]?.value || r["業界"]?.value || "",
-        },
-        opportunity: {
-          Name: r["案件名"]?.value || r["商談名"]?.value || "不明",
-          Amount:
-            parseFloat(r["金額"]?.value || r["予算"]?.value || "0") || 0,
-          StageName: r["ステージ"]?.value || r["状況"]?.value || "",
-          CloseDate: r["完了予定日"]?.value || r["期限"]?.value || "",
-          Description: r["概要"]?.value || r["説明"]?.value || r["メモ"]?.value || "",
-        },
-        activities: [],
-        contacts: r["担当者"]?.value
-          ? [{ Name: r["担当者"].value }]
-          : [],
-      };
+      if (!res.ok) throw new Error(json.error || "レコード取得失敗");
+      const data = json.data;
       setSfData(data);
       try {
         localStorage.setItem("sf_proposal_data", JSON.stringify(data));
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
 
       const anaRes = await fetch("/api/proposal/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          data,
-          aiProvider,
-          aiApiKey: aiApiKey || undefined,
-        }),
+        body: JSON.stringify({ data, aiProvider }),
       });
       const anaJson = await anaRes.json();
       if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
@@ -669,7 +589,7 @@ export default function ProposalPage() {
     } finally {
       setLoading(false);
     }
-  }, [kintone, selectedOppId, aiProvider, aiApiKey]);
+  }, [kintone, kintoneEnvConfigured, selectedOppId, aiProvider]);
 
   // --- Common: analyze from a deal record (file/manual) ---
   const analyzeFromDeal = useCallback(
@@ -695,30 +615,36 @@ export default function ProposalPage() {
         setSfData(data);
         try {
           localStorage.setItem("sf_proposal_data", JSON.stringify(data));
-        } catch {
-          /* ignore */
-        }
+        } catch { /* ignore */ }
 
+        // --- MOCK: 分析結果をダミーデータで返す ---
+        await new Promise((r) => setTimeout(r, 800));
+        setAnalysis(getMockAnalysis("", data));
+        setStep("analyze");
+        // --- END MOCK ---
+
+        /* --- ORIGINAL: 本番接続時はこちらを使用 ---
         const anaRes = await fetch("/api/proposal/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             data,
             aiProvider,
-            aiApiKey: aiApiKey || undefined,
+            aiApiKey: undefined,
           }),
         });
         const anaJson = await anaRes.json();
         if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
         setAnalysis(anaJson.analysis);
         setStep("analyze");
+        --- END ORIGINAL --- */
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "分析失敗");
       } finally {
         setLoading(false);
       }
     },
-    [aiProvider, aiApiKey],
+    [aiProvider],
   );
 
   // --- File deal selection ---
@@ -826,7 +752,7 @@ export default function ProposalPage() {
           data: sfData,
           analysis,
           aiProvider,
-          aiApiKey: aiApiKey || undefined,
+          aiApiKey: undefined,
         }),
       });
       if (!res.ok) {
@@ -848,7 +774,7 @@ export default function ProposalPage() {
     } finally {
       setGenerating(false);
     }
-  }, [sfData, analysis, aiProvider, aiApiKey]);
+  }, [sfData, analysis, aiProvider]);
 
   return (
     <div className="max-w-4xl mx-auto py-8 px-4">
@@ -951,24 +877,6 @@ export default function ProposalPage() {
                   ))}
                 </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-muted-foreground mb-1">
-                  {AI_PROVIDERS.find((p) => p.id === aiProvider)?.label} API
-                  キー{" "}
-                  <span className="opacity-60">
-                    （未入力の場合は環境変数を使用）
-                  </span>
-                </label>
-                <input
-                  type="password"
-                  placeholder={
-                    AI_PROVIDERS.find((p) => p.id === aiProvider)?.placeholder
-                  }
-                  value={aiApiKey}
-                  onChange={(e) => setAiApiKey(e.target.value)}
-                  className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-                />
-              </div>
             </div>
           </div>
 
@@ -1061,69 +969,78 @@ export default function ProposalPage() {
               <h2 className="text-lg font-bold text-foreground mb-4">
                 Kintone 接続情報
               </h2>
-              <div className="grid grid-cols-1 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-1">
-                    サブドメイン{" "}
-                    <span className="opacity-60">
-                      （例: mycompany → mycompany.cybozu.com）
-                    </span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="mycompany"
-                    value={kintone.subdomain}
-                    onChange={(e) =>
-                      setKintone((p) => ({
-                        ...p,
-                        subdomain: e.target.value,
-                      }))
-                    }
-                    className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-                  />
+              {kintoneEnvConfigured && (
+                <div className="flex items-center gap-2 mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+                  <CheckCircle2 className="w-4 h-4" />
+                  環境変数から接続情報が設定されています（{kintone.subdomain}.cybozu.com / アプリID: {kintone.appId}）
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-1">
-                    APIトークン
-                  </label>
-                  <input
-                    type="password"
-                    placeholder="xxxxxxxxxxxxxx"
-                    value={kintone.apiToken}
-                    onChange={(e) =>
-                      setKintone((p) => ({
-                        ...p,
-                        apiToken: e.target.value,
-                      }))
-                    }
-                    className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-                  />
+              )}
+              {!kintoneEnvConfigured && (
+                <div className="grid grid-cols-1 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-1">
+                      サブドメイン{" "}
+                      <span className="opacity-60">
+                        （例: mycompany → mycompany.cybozu.com）
+                      </span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="mycompany"
+                      value={kintone.subdomain}
+                      onChange={(e) =>
+                        setKintone((p) => ({
+                          ...p,
+                          subdomain: e.target.value,
+                        }))
+                      }
+                      className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-1">
+                      APIトークン
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="xxxxxxxxxxxxxx"
+                      value={kintone.apiToken}
+                      onChange={(e) =>
+                        setKintone((p) => ({
+                          ...p,
+                          apiToken: e.target.value,
+                        }))
+                      }
+                      className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-1">
+                      アプリID{" "}
+                      <span className="opacity-60">
+                        （案件管理アプリのID）
+                      </span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="123"
+                      value={kintone.appId}
+                      onChange={(e) =>
+                        setKintone((p) => ({ ...p, appId: e.target.value }))
+                      }
+                      className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-1">
-                    アプリID{" "}
-                    <span className="opacity-60">
-                      （案件管理アプリのID）
-                    </span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="123"
-                    value={kintone.appId}
-                    onChange={(e) =>
-                      setKintone((p) => ({ ...p, appId: e.target.value }))
-                    }
-                    className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-                  />
-                </div>
-              </div>
+              )}
               <button
                 onClick={handleKintoneConnect}
                 disabled={
                   loading ||
-                  !kintone.subdomain ||
-                  !kintone.apiToken ||
-                  !kintone.appId
+                  (!kintoneEnvConfigured &&
+                    (!kintone.subdomain ||
+                      !kintone.apiToken ||
+                      !kintone.appId))
                 }
                 className={cn(
                   "mt-6 w-full font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2",

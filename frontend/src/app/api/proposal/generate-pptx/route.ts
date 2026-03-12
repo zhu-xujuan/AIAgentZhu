@@ -391,7 +391,7 @@ async function renderPPTX(plan: PresentationPlan, title: string): Promise<Buffer
 
       switch (el.type) {
         case 'text': {
-          slide.addText(el.content || '', {
+          slide.addText(String(el.content ?? ''), {
             ...baseOpts,
             fontSize: el.fontSize || 14,
             fontFace,
@@ -419,7 +419,7 @@ async function renderPPTX(plan: PresentationPlan, title: string): Promise<Buffer
         case 'list': {
           const items = el.items || [];
           const textItems = items.map((item, idx) => ({
-            text: item,
+            text: String(item ?? ''),
             options: { bullet: true, breakLine: idx < items.length - 1 },
           }));
           slide.addText(textItems, {
@@ -446,7 +446,7 @@ async function renderPPTX(plan: PresentationPlan, title: string): Promise<Buffer
             fill: { color: el.valueColor || plan.theme.accent },
           });
           // Value
-          slide.addText(el.value || '', {
+          slide.addText(String(el.value ?? ''), {
             x: el.x, y: el.y + 0.1, w: el.w, h: el.h * 0.55,
             fontSize: Math.min(36, Math.max(20, Math.round(el.h * 18))),
             fontFace,
@@ -457,7 +457,7 @@ async function renderPPTX(plan: PresentationPlan, title: string): Promise<Buffer
             margin: 0,
           });
           // Label
-          slide.addText(el.label || '', {
+          slide.addText(String(el.label ?? ''), {
             x: el.x, y: el.y + el.h * 0.6, w: el.w, h: el.h * 0.35,
             fontSize: 11,
             fontFace,
@@ -475,7 +475,7 @@ async function renderPPTX(plan: PresentationPlan, title: string): Promise<Buffer
           const headerBg = el.headerBg || plan.theme.primary;
           const tableRows = rows.map((row, ri) =>
             row.map(cell => ({
-              text: cell,
+              text: String(cell ?? ''),
               options: {
                 fontSize: ri === 0 ? 11 : 10,
                 fontFace,

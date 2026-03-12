@@ -127,7 +127,7 @@ export default function SFSolutionPage() {
 
   // AI settings
   const [aiProvider, setAiProvider] = useState<AIProvider>("gemini");
-  const [aiApiKey, setAiApiKey] = useState("");
+
 
   // SF data (from Proposal tab - shared via localStorage or manual input)
   const [sfData, setSfData] = useState<R | null>(null);
@@ -211,7 +211,7 @@ export default function SFSolutionPage() {
                 ? dealInput
                 : null,
             aiProvider,
-            aiApiKey: aiApiKey || undefined,
+            aiApiKey: undefined,
           }),
           signal: controller.signal,
         });
@@ -249,7 +249,7 @@ export default function SFSolutionPage() {
         abortRef.current = null;
       }
     },
-    [question, isLoading, messages, sfData, dealInput, aiProvider, aiApiKey],
+    [question, isLoading, messages, sfData, dealInput, aiProvider],
   );
 
   const handleCancel = useCallback(() => {
@@ -336,7 +336,7 @@ export default function SFSolutionPage() {
           data: pptxData,
           analysis: fakeAnalysis,
           aiProvider,
-          aiApiKey: aiApiKey || undefined,
+          aiApiKey: undefined,
         }),
       });
 
@@ -358,7 +358,7 @@ export default function SFSolutionPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [messages, sfData, dealInput, aiProvider, aiApiKey]);
+  }, [messages, sfData, dealInput, aiProvider]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)]">
@@ -462,13 +462,6 @@ export default function SFSolutionPage() {
                     : "ChatGPT"}
               </button>
             ))}
-            <input
-              type="password"
-              placeholder="APIキー（未入力→環境変数）"
-              value={aiApiKey}
-              onChange={(e) => setAiApiKey(e.target.value)}
-              className="flex-1 max-w-xs border border-border rounded px-2 py-1 text-xs bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
-            />
           </div>
         </div>
       )}
