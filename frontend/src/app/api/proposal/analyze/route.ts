@@ -37,11 +37,15 @@ interface ServiceRecommendation {
   features: string[];
 }
 
+type ProposalJudgment = "existing_service" | "dx_development" | "not_proposable";
+
 interface AnalysisRationale {
   customerChallenges: string[];
   serviceRecommendations: ServiceRecommendation[];
   combinedSolution: string;
   existingProposalHints: string[];
+  proposalJudgment: ProposalJudgment;
+  proposalJudgmentReason: string;
 }
 
 interface AnalysisResult {
@@ -113,13 +117,13 @@ function getProposalReadiness(data: SFData, activityScore: number): number {
 }
 
 // ---- AI-powered rationale generation ----
-function buildRationalePrompt(data: SFData): string {
+function buildRationalePrompt(data: SFData, availableTemplateServices: string[]): string {
   const parts: string[] = [`顧客情報:
 - 会社名: ${data.account.Name || '不明'}
 - 業界: ${data.account.Industry || '未設定'}
 - 商談名: ${data.opportunity.Name || '不明'}
 - 説明: ${data.opportunity.Description || 'なし'}
-- 金額: ${data.opportunity.Amount || 0}
+- 予算（金額）: ${data.opportunity.Amount ? `${data.opportunity.Amount.toLocaleString()}円` : '未設定'}
 - ステージ: ${data.opportunity.StageName || '未設定'}`];
 
   if (data.activities?.length > 0) {
@@ -135,6 +139,10 @@ function buildRationalePrompt(data: SFData): string {
     parts.push(`メール件名: ${data.emails.slice(0, 5).map((e: R) => e.Subject || '').filter(Boolean).join('、')}`);
   }
 
+  const templateSection = availableTemplateServices.length > 0
+    ? `## 社内にアップロード済みの紹介資料・提案書テンプレート\n${availableTemplateServices.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+    : `## 社内にアップロード済みの紹介資料・提案書テンプレート\n（現在アップロードなし）`;
+
   return `以下の顧客データを分析し、JSON形式で回答してください。
 
 ${parts.join('\n')}
@@ -143,6 +151,24 @@ ${parts.join('\n')}
 1. **DX開発サービス**: カスタムDXソリューション設計・開発、レガシーシステム刷新、業務プロセス自動化、API連携、Web/モバイルアプリ開発、データ基盤構築
 2. **AI RAG Agent**: RAGベースのAI質問応答システム、社内ナレッジ検索、ドキュメント自動分類・検索、商談分析・提案書自動生成
 3. **書きあげクン**: AI音声文字起こし、会議録・議事録自動作成、多言語対応、要約・キーポイント抽出
+
+${templateSection}
+
+## 提案判定ルール（proposalJudgment）
+以下の優先順位で判定してください：
+
+1. **"existing_service"**（既存サービスで対応可能）
+   - 上記のアップロード済みテンプレートの中に、顧客の課題・ニーズに合致するサービスが存在する場合
+
+2. **"dx_development"**（DX新規開発を推薦）
+   - 既存テンプレートに合致するサービスがない、またはテンプレートが未アップロードの場合
+   - ただし、顧客の予算・規模・課題がDX新規開発で対応可能な範囲であること
+   - 目安：予算が100万円以上、または明確な業務課題がある場合
+
+3. **"not_proposable"**（提案不可）
+   - 顧客の予算が極端に低く（目安：10万円未満）かつ要件が大規模・複雑な場合
+   - 顧客の業界・規制上の制約でサービス提供が困難な場合
+   - 技術的・物理的に実現不可能な要件がある場合
 
 ## 回答形式（JSON以外のテキストは一切不要）
 {
@@ -156,12 +182,14 @@ ${parts.join('\n')}
     }
   ],
   "combinedSolution": "複数サービスを組み合わせた包括的なソリューションの説明（2〜3文）",
-  "existingProposalHints": ["提案書に含めるべきポイント1", "ポイント2", "ポイント3"]
+  "existingProposalHints": ["提案書に含めるべきポイント1", "ポイント2", "ポイント3"],
+  "proposalJudgment": "existing_service または dx_development または not_proposable",
+  "proposalJudgmentReason": "判定の根拠を1〜2文で説明"
 }`;
 }
 
-async function generateRationale(data: SFData, provider: AIProvider, apiKey: string): Promise<AnalysisRationale> {
-  const prompt = buildRationalePrompt(data);
+async function generateRationale(data: SFData, provider: AIProvider, apiKey: string, availableTemplateServices: string[]): Promise<AnalysisRationale> {
+  const prompt = buildRationalePrompt(data, availableTemplateServices);
   let text = '';
 
   switch (provider) {
@@ -191,6 +219,9 @@ async function generateRationale(data: SFData, provider: AIProvider, apiKey: str
 
   try {
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    const judgment = ['existing_service', 'dx_development', 'not_proposable'].includes(parsed.proposalJudgment)
+      ? parsed.proposalJudgment as ProposalJudgment
+      : 'dx_development';
     return {
       customerChallenges: parsed.customerChallenges || [],
       serviceRecommendations: (parsed.serviceRecommendations || []).map((s: R) => ({
@@ -201,9 +232,10 @@ async function generateRationale(data: SFData, provider: AIProvider, apiKey: str
       })),
       combinedSolution: parsed.combinedSolution || '',
       existingProposalHints: parsed.existingProposalHints || [],
+      proposalJudgment: judgment,
+      proposalJudgmentReason: parsed.proposalJudgmentReason || '',
     };
   } catch {
-    // Fallback if AI response is not valid JSON
     return {
       customerChallenges: ['顧客課題の詳細分析にはより多くの情報が必要です'],
       serviceRecommendations: [
@@ -212,6 +244,8 @@ async function generateRationale(data: SFData, provider: AIProvider, apiKey: str
       ],
       combinedSolution: 'DX開発で基盤を構築し、AI RAG Agentで知識活用を最適化するソリューションを提案します。',
       existingProposalHints: ['顧客の業界特性に合わせた提案', 'ROI試算の提示'],
+      proposalJudgment: 'dx_development',
+      proposalJudgmentReason: 'AI分析結果の解析に失敗したため、デフォルトとしてDX新規開発を推薦します。',
     };
   }
 }
@@ -294,7 +328,7 @@ function analyzeData(data: SFData): Omit<AnalysisResult, 'rationale'> {
 
 export async function POST(req: NextRequest) {
   try {
-    const { data, aiProvider: reqProvider, aiApiKey: reqApiKey } = await req.json();
+    const { data, aiProvider: reqProvider, aiApiKey: reqApiKey, availableTemplateServices } = await req.json();
     if (!data?.opportunity?.Id) {
       return NextResponse.json({ error: '商談データが不足しています' }, { status: 400 });
     }
@@ -311,15 +345,19 @@ export async function POST(req: NextRequest) {
     const apiKey = reqApiKey || envKeyMap[provider];
     console.log(`[analyze] provider=${provider}, keySource=${reqApiKey ? 'request' : 'env'}, keyPrefix=${apiKey?.slice(0, 8)}..., keyLen=${apiKey?.length}`);
 
+    const templateServices: string[] = Array.isArray(availableTemplateServices) ? availableTemplateServices : [];
+
     let rationale: AnalysisRationale;
     if (apiKey) {
-      rationale = await generateRationale(data, provider, apiKey);
+      rationale = await generateRationale(data, provider, apiKey, templateServices);
     } else {
       rationale = {
         customerChallenges: ['AI分析にはAPIキーが必要です'],
         serviceRecommendations: [],
         combinedSolution: '',
         existingProposalHints: [],
+        proposalJudgment: 'dx_development',
+        proposalJudgmentReason: 'APIキー未設定のため判定できません。',
       };
     }
 

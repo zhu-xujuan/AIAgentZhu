@@ -40,6 +40,7 @@ import type {
   SFData,
   AIProvider,
   Step,
+  ProposalJudgment,
 } from "./types";
 import {
   MOCK_OPPORTUNITIES,
@@ -200,6 +201,7 @@ export default function ProposalPage() {
   const [dataSource, setDataSource] = useState<DataSource>("salesforce");
 
   // Salesforce
+  const [sfAuthMode, setSfAuthMode] = useState<"api_key" | "password">("api_key");
   const [creds, setCreds] = useState<SFCredentials>({
     username: "",
     password: "",
@@ -369,31 +371,55 @@ export default function ProposalPage() {
     setError("");
     setLoading(true);
     try {
-      // --- MOCK: Salesforce商談一覧をダミーデータで返す ---
-      await new Promise((r) => setTimeout(r, 500));
-      setOpportunities(MOCK_OPPORTUNITIES);
-      setSfObjectType("Opportunity");
-      setStep("select");
-      // --- END MOCK ---
-
-      /* --- ORIGINAL: 本番接続時はこちらを使用 ---
       const res = await fetch("/api/proposal/sf-data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "list", credentials: creds }),
+        body: JSON.stringify({
+          action: "list",
+          authMode: sfAuthMode,
+          credentials: sfAuthMode === "password" ? creds : undefined,
+        }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "接続失敗");
       setOpportunities(json.opportunities);
       setSfObjectType(json.objectType || "Opportunity");
       setStep("select");
-      --- END ORIGINAL --- */
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "接続失敗");
     } finally {
       setLoading(false);
     }
-  }, [creds]);
+  }, [creds, sfAuthMode]);
+
+  // テンプレート一覧からサービス名を取得
+  const fetchTemplateServices = useCallback(async (): Promise<string[]> => {
+    try {
+      const res = await fetch("/api/proposal/templates");
+      const json = await res.json();
+      return (json.templates || []).map((t: { serviceName: string }) => t.serviceName).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }, []);
+
+  // analyze APIを呼び出す共通関数
+  const callAnalyze = useCallback(async (data: SFData): Promise<AnalysisResult> => {
+    const templateServices = await fetchTemplateServices();
+    const anaRes = await fetch("/api/proposal/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data,
+        aiProvider,
+        aiApiKey: undefined,
+        availableTemplateServices: templateServices,
+      }),
+    });
+    const anaJson = await anaRes.json();
+    if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
+    return anaJson.analysis;
+  }, [aiProvider, fetchTemplateServices]);
 
   const handleFetchAndAnalyze = useCallback(async () => {
     if (!selectedOppId) {
@@ -403,24 +429,13 @@ export default function ProposalPage() {
     setError("");
     setLoading(true);
     try {
-      // --- MOCK: ダミーデータで商談詳細＋分析結果を返す ---
-      await new Promise((r) => setTimeout(r, 800));
-      const mockData = MOCK_SF_DATA_MAP[selectedOppId] || Object.values(MOCK_SF_DATA_MAP)[0];
-      setSfData(mockData);
-      try {
-        localStorage.setItem("sf_proposal_data", JSON.stringify(mockData));
-      } catch { /* ignore */ }
-      setAnalysis(getMockAnalysis(selectedOppId, mockData));
-      setStep("analyze");
-      // --- END MOCK ---
-
-      /* --- ORIGINAL: 本番接続時はこちらを使用 ---
       const sfRes = await fetch("/api/proposal/sf-data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "fetch",
-          credentials: creds,
+          authMode: sfAuthMode,
+          credentials: sfAuthMode === "password" ? creds : undefined,
           opportunityId: selectedOppId,
           objectType: sfObjectType,
         }),
@@ -430,28 +445,17 @@ export default function ProposalPage() {
       setSfData(sfJson.data);
       try {
         localStorage.setItem("sf_proposal_data", JSON.stringify(sfJson.data));
-      } catch {}
+      } catch { /* ignore */ }
 
-      const anaRes = await fetch("/api/proposal/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          data: sfJson.data,
-          aiProvider,
-          aiApiKey: undefined,
-        }),
-      });
-      const anaJson = await anaRes.json();
-      if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
-      setAnalysis(anaJson.analysis);
+      const result = await callAnalyze(sfJson.data);
+      setAnalysis(result);
       setStep("analyze");
-      --- END ORIGINAL --- */
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "データ取得失敗");
     } finally {
       setLoading(false);
     }
-  }, [creds, selectedOppId, sfObjectType, aiProvider]);
+  }, [creds, sfAuthMode, selectedOppId, sfObjectType, callAnalyze]);
 
   // --- File upload flow ---
   const handleFileUpload = useCallback(
@@ -575,21 +579,15 @@ export default function ProposalPage() {
         localStorage.setItem("sf_proposal_data", JSON.stringify(data));
       } catch { /* ignore */ }
 
-      const anaRes = await fetch("/api/proposal/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data, aiProvider }),
-      });
-      const anaJson = await anaRes.json();
-      if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
-      setAnalysis(anaJson.analysis);
+      const result = await callAnalyze(data);
+      setAnalysis(result);
       setStep("analyze");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "データ取得失敗");
     } finally {
       setLoading(false);
     }
-  }, [kintone, kintoneEnvConfigured, selectedOppId, aiProvider]);
+  }, [kintone, kintoneEnvConfigured, selectedOppId, callAnalyze]);
 
   // --- Common: analyze from a deal record (file/manual) ---
   const analyzeFromDeal = useCallback(
@@ -617,34 +615,16 @@ export default function ProposalPage() {
           localStorage.setItem("sf_proposal_data", JSON.stringify(data));
         } catch { /* ignore */ }
 
-        // --- MOCK: 分析結果をダミーデータで返す ---
-        await new Promise((r) => setTimeout(r, 800));
-        setAnalysis(getMockAnalysis("", data));
+        const result = await callAnalyze(data);
+        setAnalysis(result);
         setStep("analyze");
-        // --- END MOCK ---
-
-        /* --- ORIGINAL: 本番接続時はこちらを使用 ---
-        const anaRes = await fetch("/api/proposal/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            data,
-            aiProvider,
-            aiApiKey: undefined,
-          }),
-        });
-        const anaJson = await anaRes.json();
-        if (!anaRes.ok) throw new Error(anaJson.error || "分析失敗");
-        setAnalysis(anaJson.analysis);
-        setStep("analyze");
-        --- END ORIGINAL --- */
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "分析失敗");
       } finally {
         setLoading(false);
       }
     },
-    [aiProvider],
+    [callAnalyze],
   );
 
   // --- File deal selection ---
@@ -884,68 +864,110 @@ export default function ProposalPage() {
           {dataSource === "salesforce" && (
             <div className="bg-card border border-border rounded-2xl shadow-sm p-8">
               <h2 className="text-lg font-bold text-foreground mb-4">
-                Salesforce 認証情報
+                Salesforce 接続設定
               </h2>
-              <div className="grid grid-cols-1 gap-4">
+
+              {/* 認証モード切り替え */}
+              <div className="flex gap-2 mb-6 p-1 bg-muted rounded-xl">
                 {(
                   [
-                    {
-                      label: "ユーザー名（メールアドレス）",
-                      key: "username",
-                      type: "email",
-                      placeholder: "you@company.com",
-                    },
-                    {
-                      label: "パスワード",
-                      key: "password",
-                      type: "password",
-                      placeholder: "••••••••",
-                    },
-                    {
-                      label: "セキュリティトークン（任意）",
-                      key: "securityToken",
-                      type: "password",
-                      placeholder: "未設定でもログイン可能",
-                    },
+                    { mode: "api_key", label: "APIキー（デフォルト）" },
+                    { mode: "password", label: "ユーザー名・パスワード" },
                   ] as const
-                ).map((f) => (
-                  <div key={f.key}>
+                ).map(({ mode, label }) => (
+                  <button
+                    key={mode}
+                    onClick={() => setSfAuthMode(mode)}
+                    className={cn(
+                      "flex-1 py-2 px-3 text-sm font-medium rounded-lg transition-colors",
+                      sfAuthMode === mode
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* APIキーモード */}
+              {sfAuthMode === "api_key" && (
+                <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 mb-6 text-sm text-emerald-700">
+                  <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium">環境変数からAPIキーが設定されています</p>
+                    <p className="text-xs mt-0.5 opacity-80">SALESFORCE_CLIENT_ID / SALESFORCE_CLIENT_SECRET を使用して接続します</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ユーザー名・パスワードモード */}
+              {sfAuthMode === "password" && (
+                <div className="grid grid-cols-1 gap-4 mb-6">
+                  {(
+                    [
+                      {
+                        label: "ユーザー名（メールアドレス）",
+                        key: "username",
+                        type: "email",
+                        placeholder: "you@company.com",
+                      },
+                      {
+                        label: "パスワード",
+                        key: "password",
+                        type: "password",
+                        placeholder: "••••••••",
+                      },
+                      {
+                        label: "セキュリティトークン（任意）",
+                        key: "securityToken",
+                        type: "password",
+                        placeholder: "未設定でもログイン可能",
+                      },
+                    ] as const
+                  ).map((f) => (
+                    <div key={f.key}>
+                      <label className="block text-sm font-medium text-muted-foreground mb-1">
+                        {f.label}
+                      </label>
+                      <input
+                        type={f.type}
+                        placeholder={f.placeholder}
+                        value={creds[f.key]}
+                        onChange={(e) =>
+                          setCreds((p) => ({ ...p, [f.key]: e.target.value }))
+                        }
+                        className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+                      />
+                    </div>
+                  ))}
+                  <div>
                     <label className="block text-sm font-medium text-muted-foreground mb-1">
-                      {f.label}
+                      ログインURL{" "}
+                      <span className="opacity-60">
+                        （Sandbox: test.salesforce.com）
+                      </span>
                     </label>
                     <input
-                      type={f.type}
-                      placeholder={f.placeholder}
-                      value={creds[f.key]}
+                      type="text"
+                      value={creds.loginUrl}
                       onChange={(e) =>
-                        setCreds((p) => ({ ...p, [f.key]: e.target.value }))
+                        setCreds((p) => ({ ...p, loginUrl: e.target.value }))
                       }
                       className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
                     />
                   </div>
-                ))}
-                <div>
-                  <label className="block text-sm font-medium text-muted-foreground mb-1">
-                    ログインURL{" "}
-                    <span className="opacity-60">
-                      （Sandbox: test.salesforce.com）
-                    </span>
-                  </label>
-                  <input
-                    type="text"
-                    value={creds.loginUrl}
-                    onChange={(e) =>
-                      setCreds((p) => ({ ...p, loginUrl: e.target.value }))
-                    }
-                    className="w-full border border-border rounded-lg px-3 py-2.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-                  />
                 </div>
-              </div>
+              )}
+
               <button
                 onClick={handleFetchOpportunities}
-                disabled={loading || !creds.username || !creds.password}
+                disabled={
+                  loading ||
+                  (sfAuthMode === "password" && (!creds.username || !creds.password))
+                }
                 className={cn(
-                  "mt-6 w-full font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2",
+                  "w-full font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2",
                   "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
                 )}
               >
@@ -1649,6 +1671,62 @@ export default function ProposalPage() {
             </div>
           )}
 
+          {/* Proposal Judgment Card */}
+          {analysis.rationale?.proposalJudgment && (() => {
+            const judgment = analysis.rationale.proposalJudgment as ProposalJudgment;
+            const config: Record<ProposalJudgment, {
+              icon: string; title: string; color: string; border: string; bg: string;
+            }> = {
+              existing_service: {
+                icon: "✅", title: "既存サービスで対応可能",
+                color: "text-green-700 dark:text-green-300",
+                border: "border-green-300 dark:border-green-700",
+                bg: "bg-green-50 dark:bg-green-950/30",
+              },
+              dx_development: {
+                icon: "🔧", title: "DX新規開発を推薦",
+                color: "text-blue-700 dark:text-blue-300",
+                border: "border-blue-300 dark:border-blue-700",
+                bg: "bg-blue-50 dark:bg-blue-950/30",
+              },
+              not_proposable: {
+                icon: "🚫", title: "提案不可",
+                color: "text-red-700 dark:text-red-300",
+                border: "border-red-300 dark:border-red-700",
+                bg: "bg-red-50 dark:bg-red-950/30",
+              },
+            };
+            const c = config[judgment];
+            return (
+              <div className={cn("border-2 rounded-2xl p-6 mb-6", c.border, c.bg)}>
+                <div className={cn("flex items-center gap-3 mb-2", c.color)}>
+                  <span className="text-2xl">{c.icon}</span>
+                  <h2 className="text-xl font-extrabold">{c.title}</h2>
+                </div>
+                <p className={cn("text-sm leading-relaxed", c.color)}>
+                  {analysis.rationale.proposalJudgmentReason}
+                </p>
+                {judgment === "existing_service" && (
+                  <p className="text-xs mt-2 text-green-600 dark:text-green-400">
+                    社内にアップロード済みの紹介資料・提案書テンプレートが活用できます。提案書を生成してください。
+                  </p>
+                )}
+                {judgment === "dx_development" && (
+                  <p className="text-xs mt-2 text-blue-600 dark:text-blue-400">
+                    既存サービスのテンプレートは見つかりませんでしたが、DX新規開発として提案可能です。
+                    まずサービス紹介資料をアップロードすることで、より精度の高い提案書を作成できます。
+                  </p>
+                )}
+                {judgment === "not_proposable" && (
+                  <p className="text-xs mt-2 text-red-600 dark:text-red-400 font-medium">
+                    上記の理由により、現時点では提案書の生成を推奨しません。
+                    顧客の要件・予算条件を再確認してください。
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+
           <div className="bg-card border border-border rounded-2xl shadow-sm p-8">
             <h2 className="text-xl font-bold text-foreground mb-1">
               分析結果
@@ -1798,26 +1876,33 @@ export default function ProposalPage() {
               <ChevronLeft className="w-4 h-4" />
               戻る
             </button>
-            <button
-              onClick={handlePreGenerate}
-              disabled={generating}
-              className={cn(
-                "flex-[2] font-bold py-3 rounded-xl transition-all shadow-sm flex items-center justify-center gap-2",
-                "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
-              )}
-            >
-              {generating ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  AIで提案書を生成中...
-                </>
-              ) : (
-                <>
-                  <Download className="w-4 h-4" />
-                  PPTX提案書を生成・ダウンロード
-                </>
-              )}
-            </button>
+            {analysis.rationale?.proposalJudgment === "not_proposable" ? (
+              <div className="flex-[2] flex items-center justify-center gap-2 py-3 rounded-xl bg-red-100 dark:bg-red-950/30 border-2 border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 font-bold text-sm">
+                <span>🚫</span>
+                提案不可 — 提案書の生成はできません
+              </div>
+            ) : (
+              <button
+                onClick={handlePreGenerate}
+                disabled={generating}
+                className={cn(
+                  "flex-[2] font-bold py-3 rounded-xl transition-all shadow-sm flex items-center justify-center gap-2",
+                  "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
+                )}
+              >
+                {generating ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    AIで提案書を生成中...
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    PPTX提案書を生成・ダウンロード
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       )}

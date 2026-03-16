@@ -17,6 +17,38 @@ const ALL_OBJECTS = [
   'EmailMessage',
 ];
 
+/** OAuth2 client_credentials フロー（.envのAPIキーを使用） */
+async function createConnectionWithApiKey() {
+  const instanceUrl = process.env.SALESFORCE_INSTANCE_URL;
+  const clientId = process.env.SALESFORCE_CLIENT_ID;
+  const clientSecret = process.env.SALESFORCE_CLIENT_SECRET;
+
+  if (!instanceUrl || !clientId || !clientSecret) {
+    throw new Error('環境変数 SALESFORCE_INSTANCE_URL / SALESFORCE_CLIENT_ID / SALESFORCE_CLIENT_SECRET が設定されていません');
+  }
+
+  const tokenRes = await fetch(`${instanceUrl}/services/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      client_secret: clientSecret,
+    }),
+  });
+  const tokenJson = await tokenRes.json();
+  if (!tokenRes.ok || !tokenJson.access_token) {
+    throw new Error(`Salesforce OAuth認証失敗: ${tokenJson.error_description || tokenJson.error || 'unknown'}`);
+  }
+
+  const conn = new jsforce.Connection({
+    instanceUrl,
+    accessToken: tokenJson.access_token,
+  });
+  return conn;
+}
+
+/** ユーザー名・パスワード認証 */
 async function createConnection(creds: SFCredentials) {
   const conn = new jsforce.Connection({
     loginUrl: creds.loginUrl || 'https://login.salesforce.com',
@@ -287,13 +319,18 @@ async function gatherFullData(conn: InstanceType<typeof jsforce.Connection>, ava
 
 export async function POST(req: NextRequest) {
   try {
-    const { action, credentials, opportunityId, objectType: reqObjectType } = await req.json();
+    const { action, authMode, credentials, opportunityId, objectType: reqObjectType } = await req.json();
 
-    if (!credentials?.username || !credentials?.password) {
-      return NextResponse.json({ error: '認証情報が不足しています' }, { status: 400 });
+    let conn: InstanceType<typeof jsforce.Connection>;
+    if (authMode === 'password') {
+      if (!credentials?.username || !credentials?.password) {
+        return NextResponse.json({ error: '認証情報が不足しています' }, { status: 400 });
+      }
+      conn = await createConnection(credentials);
+    } else {
+      // デフォルト: client_credentials（APIキー）
+      conn = await createConnectionWithApiKey();
     }
-
-    const conn = await createConnection(credentials);
 
     // Check which objects are available
     if (action === 'check') {

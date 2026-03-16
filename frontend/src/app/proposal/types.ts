@@ -63,11 +63,15 @@ export interface ServiceRecommendation {
   features: string[];
 }
 
+export type ProposalJudgment = "existing_service" | "dx_development" | "not_proposable";
+
 export interface AnalysisRationale {
   customerChallenges: string[];
   serviceRecommendations: ServiceRecommendation[];
   combinedSolution: string;
   existingProposalHints: string[];
+  proposalJudgment: ProposalJudgment;
+  proposalJudgmentReason: string;
 }
 
 export interface AnalysisResult {
