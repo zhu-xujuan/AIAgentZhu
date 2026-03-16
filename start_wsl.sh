@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 LOG_DIR="$ROOT_DIR/.run-logs"
-ROOT_WIN_PATH="$(wslpath -w "$ROOT_DIR")"
+ROOT_WIN_PATH="$(wslpath -w "$ROOT_DIR" 2>/dev/null || echo "$ROOT_DIR" | sed 's|^/mnt/\([a-z]\)/|\U\1:\\|;s|/|\\|g')"
 WSL_IP="$(hostname -I | awk '{print $1}')"
 
 mkdir -p "$LOG_DIR"

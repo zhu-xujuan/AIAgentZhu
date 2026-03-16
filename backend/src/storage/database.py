@@ -895,6 +895,458 @@ class DatabaseService:
                 raise
 
     # ============================================================
+    # History Tables (Q&A + Slides + Templates)
+    # ============================================================
+
+    _history_tables_ready: bool = False
+
+    def ensure_history_tables(self) -> bool:
+        """Create history/slide/template tables if they don't exist (auto-migration)."""
+        if DatabaseService._history_tables_ready:
+            return True
+
+        try:
+            with self._get_cursor() as (cursor, conn):
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS qa_conversations (
+                        id SERIAL PRIMARY KEY,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        sources JSONB DEFAULT '[]',
+                        confidence DECIMAL(3,2),
+                        has_answer BOOLEAN DEFAULT TRUE,
+                        search_time DECIMAL(6,2),
+                        mode VARCHAR(20),
+                        from_cache BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_qa_conv_created ON qa_conversations(created_at DESC)
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS slide_decks (
+                        id SERIAL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        question TEXT,
+                        answer TEXT,
+                        plan_md TEXT,
+                        style_options JSONB DEFAULT '{}',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_slide_decks_created ON slide_decks(created_at DESC)
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS slide_pages (
+                        id SERIAL PRIMARY KEY,
+                        deck_id INTEGER REFERENCES slide_decks(id) ON DELETE CASCADE,
+                        slide_index INTEGER NOT NULL,
+                        title TEXT,
+                        slide_type VARCHAR(20) DEFAULT 'content',
+                        html TEXT NOT NULL,
+                        plan_text TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_slide_pages_deck ON slide_pages(deck_id)
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS slide_templates (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR(200) NOT NULL,
+                        position VARCHAR(20) NOT NULL,
+                        html TEXT NOT NULL,
+                        header_color VARCHAR(20),
+                        footer_color VARCHAR(20),
+                        metadata JSONB DEFAULT '{}',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(name, position)
+                    )
+                """)
+                # Auto-migration: add metadata column for existing tables
+                try:
+                    cursor.execute("""
+                        ALTER TABLE slide_templates
+                        ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'
+                    """)
+                except Exception:
+                    pass  # Column already exists or unsupported
+                conn.commit()
+
+                DatabaseService._history_tables_ready = True
+                logger.info("History tables ready (qa_conversations, slide_decks, slide_pages, slide_templates)")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to ensure history tables: {e}")
+            return False
+
+    # ---- Q&A History CRUD ----
+
+    def save_qa_conversation(
+        self,
+        question: str,
+        answer: str,
+        sources: list | None = None,
+        confidence: float | None = None,
+        has_answer: bool = True,
+        search_time: float | None = None,
+        mode: str | None = None,
+        from_cache: bool = False,
+    ) -> int:
+        """Save a Q&A conversation and return its id."""
+        import json
+        if not self.ensure_history_tables():
+            raise RuntimeError("History tables not available")
+
+        sources_json = json.dumps(sources or [], ensure_ascii=False)
+
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO qa_conversations
+                        (question, answer, sources, confidence, has_answer, search_time, mode, from_cache)
+                    VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (question, answer, sources_json, confidence, has_answer, search_time, mode, from_cache),
+                )
+                qa_id = cursor.fetchone()[0]
+                conn.commit()
+                logger.info(f"Saved QA conversation id={qa_id}")
+                return qa_id
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to save QA conversation: {e}")
+                raise
+
+    def get_qa_history(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Get Q&A history list, newest first."""
+        if not self.ensure_history_tables():
+            return []
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                """
+                SELECT id, question, LEFT(answer, 200) as answer_preview,
+                       confidence, has_answer, mode, from_cache, created_at
+                FROM qa_conversations
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            return [
+                {**dict(row), "created_at": str(row["created_at"])}
+                for row in cursor.fetchall()
+            ]
+
+    def get_qa_detail(self, qa_id: int) -> dict | None:
+        """Get full Q&A conversation by id."""
+        import json as json_mod
+        if not self.ensure_history_tables():
+            return None
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute("SELECT * FROM qa_conversations WHERE id = %s", (qa_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result["created_at"] = str(result["created_at"])
+            if isinstance(result.get("sources"), str):
+                result["sources"] = json_mod.loads(result["sources"])
+            return result
+
+    def rename_qa_conversation(self, qa_id: int, new_question: str) -> None:
+        """Rename (update question text) of a Q&A conversation."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    "UPDATE qa_conversations SET question = %s WHERE id = %s",
+                    (new_question, qa_id),
+                )
+                conn.commit()
+                logger.info(f"Renamed QA conversation id={qa_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to rename QA conversation: {e}")
+                raise
+
+    def delete_qa_conversation(self, qa_id: int) -> None:
+        """Delete a Q&A conversation by id."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute("DELETE FROM qa_conversations WHERE id = %s", (qa_id,))
+                conn.commit()
+                logger.info(f"Deleted QA conversation id={qa_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to delete QA conversation: {e}")
+                raise
+
+    # ---- Slide Deck CRUD ----
+
+    def save_slide_deck(
+        self,
+        title: str,
+        question: str | None,
+        answer: str | None,
+        plan_md: str | None,
+        style_options: dict | None,
+        slides: list[dict],
+    ) -> int:
+        """Save a slide deck with all pages and return the deck id."""
+        import json
+        if not self.ensure_history_tables():
+            raise RuntimeError("History tables not available")
+
+        style_json = json.dumps(style_options or {}, ensure_ascii=False)
+
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO slide_decks (title, question, answer, plan_md, style_options)
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    RETURNING id
+                    """,
+                    (title, question, answer, plan_md, style_json),
+                )
+                deck_id = cursor.fetchone()[0]
+
+                for slide in slides:
+                    cursor.execute(
+                        """
+                        INSERT INTO slide_pages (deck_id, slide_index, title, slide_type, html, plan_text)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            deck_id,
+                            slide.get("slide_index", 0),
+                            slide.get("title"),
+                            slide.get("slide_type", "content"),
+                            slide.get("html", ""),
+                            slide.get("plan_text"),
+                        ),
+                    )
+
+                conn.commit()
+                logger.info(f"Saved slide deck id={deck_id} with {len(slides)} pages")
+                return deck_id
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to save slide deck: {e}")
+                raise
+
+    def update_slide_deck(
+        self,
+        deck_id: int,
+        slides: list[dict],
+        style_options: dict | None = None,
+    ) -> None:
+        """Update an existing slide deck's pages and optional style_options."""
+        import json
+        if not self.ensure_history_tables():
+            raise RuntimeError("History tables not available")
+
+        with self._get_cursor() as (cursor, conn):
+            try:
+                if style_options is not None:
+                    style_json = json.dumps(style_options, ensure_ascii=False)
+                    cursor.execute(
+                        "UPDATE slide_decks SET style_options = %s::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (style_json, deck_id),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE slide_decks SET updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (deck_id,),
+                    )
+
+                # Replace all pages
+                cursor.execute("DELETE FROM slide_pages WHERE deck_id = %s", (deck_id,))
+                for slide in slides:
+                    cursor.execute(
+                        """
+                        INSERT INTO slide_pages (deck_id, slide_index, title, slide_type, html, plan_text)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            deck_id,
+                            slide.get("slide_index", 0),
+                            slide.get("title"),
+                            slide.get("slide_type", "content"),
+                            slide.get("html", ""),
+                            slide.get("plan_text"),
+                        ),
+                    )
+
+                conn.commit()
+                logger.info(f"Updated slide deck id={deck_id} with {len(slides)} pages")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to update slide deck: {e}")
+                raise
+
+    def get_slide_history(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Get slide deck history list with slide counts."""
+        if not self.ensure_history_tables():
+            return []
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                """
+                SELECT d.id, d.title, d.question, d.style_options, d.created_at, d.updated_at,
+                       COUNT(p.id) as slide_count
+                FROM slide_decks d
+                LEFT JOIN slide_pages p ON p.deck_id = d.id
+                GROUP BY d.id
+                ORDER BY d.updated_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            return [
+                {**dict(row), "created_at": str(row["created_at"]), "updated_at": str(row["updated_at"])}
+                for row in cursor.fetchall()
+            ]
+
+    def get_slide_deck_detail(self, deck_id: int) -> dict | None:
+        """Get a full slide deck with all pages."""
+        import json as json_mod
+        if not self.ensure_history_tables():
+            return None
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute("SELECT * FROM slide_decks WHERE id = %s", (deck_id,))
+            deck_row = cursor.fetchone()
+            if not deck_row:
+                return None
+
+            result = dict(deck_row)
+            result["created_at"] = str(result["created_at"])
+            result["updated_at"] = str(result["updated_at"])
+            if isinstance(result.get("style_options"), str):
+                result["style_options"] = json_mod.loads(result["style_options"])
+
+            cursor.execute(
+                "SELECT slide_index, title, slide_type, html, plan_text FROM slide_pages WHERE deck_id = %s ORDER BY slide_index",
+                (deck_id,),
+            )
+            result["slides"] = [dict(r) for r in cursor.fetchall()]
+            return result
+
+    def rename_slide_deck(self, deck_id: int, new_title: str) -> None:
+        """Rename a slide deck title."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    "UPDATE slide_decks SET title = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (new_title, deck_id),
+                )
+                conn.commit()
+                logger.info(f"Renamed slide deck id={deck_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to rename slide deck: {e}")
+                raise
+
+    def delete_slide_deck(self, deck_id: int) -> None:
+        """Delete a slide deck and its pages (CASCADE)."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute("DELETE FROM slide_decks WHERE id = %s", (deck_id,))
+                conn.commit()
+                logger.info(f"Deleted slide deck id={deck_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to delete slide deck: {e}")
+                raise
+
+    # ---- Slide Template CRUD ----
+
+    def save_slide_template(
+        self,
+        name: str,
+        position: str,
+        html: str,
+        header_color: str | None = None,
+        footer_color: str | None = None,
+        metadata: dict | None = None,
+    ) -> int:
+        """Save or update a slide template (UPSERT by name+position)."""
+        import json as _json
+        if not self.ensure_history_tables():
+            raise RuntimeError("History tables not available")
+
+        metadata_json = _json.dumps(metadata, ensure_ascii=False) if metadata else None
+
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO slide_templates (name, position, html, header_color, footer_color, metadata)
+                    VALUES (%s, %s, %s, %s, %s, COALESCE(%s, '{}')::jsonb)
+                    ON CONFLICT (name, position) DO UPDATE SET
+                        html = EXCLUDED.html,
+                        header_color = EXCLUDED.header_color,
+                        footer_color = EXCLUDED.footer_color,
+                        metadata = EXCLUDED.metadata
+                    RETURNING id
+                    """,
+                    (name, position, html, header_color, footer_color, metadata_json),
+                )
+                template_id = cursor.fetchone()[0]
+                conn.commit()
+                logger.info(f"Saved slide template id={template_id} ({name}/{position})")
+                return template_id
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to save slide template: {e}")
+                raise
+
+    def get_slide_templates(self) -> list[dict]:
+        """Get all slide templates."""
+        if not self.ensure_history_tables():
+            return []
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute("SELECT * FROM slide_templates ORDER BY position, name")
+            return [
+                {**dict(row), "created_at": str(row["created_at"])}
+                for row in cursor.fetchall()
+            ]
+
+    def get_slide_template_by_position(self, position: str) -> dict | None:
+        """Get a slide template by position (first/middle/last)."""
+        if not self.ensure_history_tables():
+            return None
+        with self._get_cursor(dict_cursor=True) as (cursor, conn):
+            cursor.execute(
+                "SELECT * FROM slide_templates WHERE position = %s ORDER BY created_at DESC LIMIT 1",
+                (position,),
+            )
+            row = cursor.fetchone()
+            if row:
+                result = dict(row)
+                result["created_at"] = str(result["created_at"])
+                return result
+            return None
+
+    def delete_slide_template(self, template_id: int) -> None:
+        """Delete a slide template by id."""
+        with self._get_cursor() as (cursor, conn):
+            try:
+                cursor.execute("DELETE FROM slide_templates WHERE id = %s", (template_id,))
+                conn.commit()
+                logger.info(f"Deleted slide template id={template_id}")
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Failed to delete slide template: {e}")
+                raise
+
+    # ============================================================
     # Query Cache Methods
     # ============================================================
 

@@ -18,7 +18,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-# Configuration from environment
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Load environment files BEFORE reading config constants
+from dotenv import load_dotenv
+ENV_LOCAL_PATH = Path(__file__).resolve().parents[1] / ".env.local"
+load_dotenv()
+load_dotenv(ENV_LOCAL_PATH, override=True)
+
+# Configuration from environment (read AFTER load_dotenv)
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))  # Default 50MB
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
@@ -36,13 +45,10 @@ IMAGE_GEN_MAX_PER_DECK = int(os.getenv("IMAGE_GEN_MAX_PER_DECK", "6"))
 IMAGE_GEN_TIMEOUT = int(os.getenv("IMAGE_GEN_TIMEOUT", "60"))
 SLIDE_GENERATION_TIMEOUT = float(os.getenv("SLIDE_GENERATION_TIMEOUT", "60"))
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from dotenv import load_dotenv
-ENV_LOCAL_PATH = Path(__file__).resolve().parents[1] / ".env.local"
-load_dotenv()
-load_dotenv(ENV_LOCAL_PATH, override=True)
+# Slide HTML generation (dedicated LLM, e.g. Grok / xAI)
+SLIDE_HTML_API_KEY = os.getenv("SLIDE_HTML_API_KEY", "")
+SLIDE_HTML_BASE_URL = os.getenv("SLIDE_HTML_BASE_URL", "https://api.x.ai/v1")
+SLIDE_HTML_MODEL = os.getenv("SLIDE_HTML_MODEL", "grok-3-mini")
 
 from src.storage.local_storage import LocalStorage
 from src.storage.database import DatabaseService, get_database_service
@@ -61,12 +67,28 @@ from src.agents.qa_agent import answer_question
 from src.agents.intent_router import IntentRouter, router_response_to_dict
 from src.agents.slide_agent import (
     SLIDE_SYSTEM_PROMPT,
+    SLIDE_SYSTEM_PROMPT_ENHANCED,
     build_generate_slide_prompt,
     build_refine_slide_prompt,
     enrich_slide_deck,
     format_slide_sources_for_prompt,
     normalize_slide_deck,
     retrieve_sources_for_slides,
+)
+from src.agents.visual_slide_agent import (
+    STYLE_PRESETS,
+    DEFAULT_PRESET,
+    build_outline_from_answer,
+    build_outline_with_llm,
+    build_slide_image_prompt,
+    SLIDE_HTML_SYSTEM_PROMPT,
+    build_slide_html_prompt,
+    extract_html_from_response,
+    generate_fallback_html,
+    IMAGE_PLACEHOLDER,
+    generate_slide_plan_md,
+    parse_slide_plan_md,
+    render_slide_from_plan,
 )
 from src.llm.ai_client import AIClient
 from src.llm.config import get_llm_config, LLMConfig, AIProvider
@@ -80,6 +102,7 @@ ai_client: Optional[AIClient] = None
 llm_config: Optional[LLMConfig] = None
 db_service: Optional[DatabaseService] = None
 ocr_client: Optional[AIClient] = None  # Dedicated client for OCR when AI_OCR_BASE_URL is set
+slide_html_client: Optional[AIClient] = None  # Dedicated client for slide HTML generation (e.g. Grok)
 
 # Alias for backwards compatibility
 ollama_client: Optional[AIClient] = None
@@ -112,7 +135,7 @@ def _upsert_env_value(env_path: Path, key: str, value: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
-    global ai_client, ollama_client, llm_config, db_service, ocr_client
+    global ai_client, ollama_client, llm_config, db_service, ocr_client, slide_html_client
 
     import time
 
@@ -156,6 +179,20 @@ async def lifespan(app: FastAPI):
         else:
             ocr_client = None
 
+        # Slide HTML client (Grok / xAI) — separate from main AI client
+        if SLIDE_HTML_API_KEY:
+            slide_html_client = AIClient(
+                base_url=SLIDE_HTML_BASE_URL,
+                model=SLIDE_HTML_MODEL,
+                embedding_model="",
+                timeout=60.0,
+                max_retries=1,
+                provider=AIProvider.OPENAI,
+                api_key=SLIDE_HTML_API_KEY,
+                max_concurrent_embeddings=1,
+            )
+            logger.info(f"Slide HTML client initialized: model={SLIDE_HTML_MODEL}, base_url={SLIDE_HTML_BASE_URL}")
+
         # Check health on startup
         health = await ai_client.health_check()
         if health.available:
@@ -196,6 +233,12 @@ async def lifespan(app: FastAPI):
                 logger.info("Query cache (CAG) is ACTIVE - similar questions will be served from cache")
             else:
                 logger.warning("Query cache (CAG) is INACTIVE - cache table could not be created")
+
+            # Ensure history tables exist (Q&A, slides, templates)
+            if db_service.ensure_history_tables():
+                logger.info("History tables ready (qa_conversations, slide_decks, slide_pages, slide_templates)")
+            else:
+                logger.warning("History tables could not be created")
         else:
             logger.warning("Database service not available. QA features will be disabled.")
     except Exception as e:
@@ -213,6 +256,9 @@ async def lifespan(app: FastAPI):
     if ocr_client and ocr_client is not ai_client:
         await ocr_client.close()
         logger.info("OCR client closed")
+    if slide_html_client:
+        await slide_html_client.close()
+        logger.info("Slide HTML client closed")
 
     if db_service:
         db_service.close()
@@ -295,6 +341,88 @@ class SlideDeckRefineRequest(BaseModel):
 
 class SlideImageRequest(BaseModel):
     prompt: str
+
+
+class VisualSlideOutlineRequest(BaseModel):
+    question: str
+    answer: Optional[str] = None
+    mode: Optional[str] = "standard"
+    max_slides: Optional[int] = None
+    style_preset: Optional[str] = None
+    use_llm: Optional[bool] = False
+
+
+class VisualSlideGenerateRequest(BaseModel):
+    question: str
+    outline: dict
+    style_preset: Optional[str] = None
+
+
+class VisualSlideRenderHtmlRequest(BaseModel):
+    slide: dict
+    style_preset: Optional[str] = None
+    deck_title: str = "Slides"
+
+
+class HtmlSlidePlanRequest(BaseModel):
+    question: str
+    answer: Optional[str] = None
+    max_slides: Optional[int] = None  # default 12
+    style_options: Optional[dict] = None
+
+
+class HtmlSlideRenderRequest(BaseModel):
+    slide_plan_section: str  # 1枚分のMDセクション
+    slide_title: str = ""    # スライドタイトル
+    slide_index: int
+    total_slides: int
+    deck_title: str
+    slide_type: str = "content"
+    style_options: Optional[dict] = None
+    use_templates: bool = False  # テンプレート使用はオプトイン
+
+
+# ---- History / Template models ----
+
+class QAConversationSave(BaseModel):
+    question: str
+    answer: str
+    sources: Optional[List[dict]] = None
+    confidence: Optional[float] = None
+    has_answer: Optional[bool] = True
+    search_time: Optional[float] = None
+    mode: Optional[str] = None
+    from_cache: Optional[bool] = False
+
+
+class SlidePageData(BaseModel):
+    slide_index: int
+    title: Optional[str] = None
+    slide_type: Optional[str] = "content"
+    html: str
+    plan_text: Optional[str] = None
+
+
+class SlideDeckSave(BaseModel):
+    title: str
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    plan_md: Optional[str] = None
+    style_options: Optional[dict] = None
+    slides: List[SlidePageData]
+
+
+class SlideDeckUpdate(BaseModel):
+    slides: List[SlidePageData]
+    style_options: Optional[dict] = None
+
+
+class SlideTemplateSave(BaseModel):
+    name: str
+    position: str  # 'first', 'middle', 'last'
+    html: str
+    header_color: Optional[str] = None
+    footer_color: Optional[str] = None
 
 
 class FormatRequest(BaseModel):
@@ -691,6 +819,23 @@ async def health_check():
         result["database"]["stats"] and
         result["database"]["stats"].get("chunks_with_embeddings", 0) > 0
     )
+
+    # Slide LLM capability (for frontend to adjust max_slides / quality)
+    result["slide_llm"] = {
+        "available": slide_html_client is not None,
+        "model": SLIDE_HTML_MODEL if slide_html_client else None,
+        "provider": (
+            "grok" if slide_html_client and "x.ai" in SLIDE_HTML_BASE_URL else
+            "gemini" if slide_html_client and "generativelanguage" in SLIDE_HTML_BASE_URL else
+            "external" if slide_html_client else None
+        ),
+    }
+
+    # Image generation capability
+    result["image_gen"] = {
+        "enabled": IMAGE_GEN_ENABLED,
+        "provider": IMAGE_GEN_PROVIDER if IMAGE_GEN_ENABLED else None,
+    }
 
     # Cache status (for debugging)
     result["cache"] = {"code_version": "2024-02-05-v2"}
@@ -1727,20 +1872,31 @@ def _build_image_prompt(slide: dict) -> str:
     return _compact_prompt(f"{base}. {style}")
 
 
-async def generate_image_data_url(prompt: str) -> Optional[str]:
+async def generate_image_data_url(prompt: str, size: str | None = None) -> Optional[str]:
     if not IMAGE_GEN_ENABLED:
-        return None
-    if IMAGE_GEN_PROVIDER != "openai":
         return None
     if not IMAGE_GEN_API_KEY:
         return None
     if not prompt.strip():
         return None
 
+    if IMAGE_GEN_PROVIDER == "gemini":
+        return await _generate_image_gemini(prompt)
+    elif IMAGE_GEN_PROVIDER == "grok":
+        return await _generate_image_grok(prompt)
+    elif IMAGE_GEN_PROVIDER == "openai":
+        return await _generate_image_openai(prompt, size)
+    else:
+        logger.warning(f"[IMAGE] Unknown provider: {IMAGE_GEN_PROVIDER}")
+        return None
+
+
+async def _generate_image_openai(prompt: str, size: str | None = None) -> Optional[str]:
+    """Generate image via OpenAI-compatible API."""
     payload = {
         "model": IMAGE_GEN_MODEL,
         "prompt": prompt,
-        "size": IMAGE_GEN_SIZE,
+        "size": size or IMAGE_GEN_SIZE,
         "response_format": "b64_json",
     }
     if IMAGE_GEN_QUALITY:
@@ -1756,7 +1912,7 @@ async def generate_image_data_url(prompt: str) -> Optional[str]:
         async with httpx.AsyncClient(timeout=IMAGE_GEN_TIMEOUT) as client:
             res = await client.post(url, headers=headers, json=payload)
             if res.status_code >= 400:
-                logger.warning(f"[IMAGE] Generation failed: {res.status_code} {res.text}")
+                logger.warning(f"[IMAGE] OpenAI generation failed: {res.status_code} {res.text}")
                 return None
             data = res.json()
             b64 = data.get("data", [{}])[0].get("b64_json")
@@ -1764,7 +1920,79 @@ async def generate_image_data_url(prompt: str) -> Optional[str]:
                 return None
             return f"data:image/png;base64,{b64}"
     except Exception as e:
-        logger.warning(f"[IMAGE] Generation error: {e}")
+        logger.warning(f"[IMAGE] OpenAI generation error: {e}")
+        return None
+
+
+async def _generate_image_gemini(prompt: str) -> Optional[str]:
+    """Generate image via Gemini native API (generateContent with image output)."""
+    model = IMAGE_GEN_MODEL or "gemini-2.0-flash-exp-image-generation"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": IMAGE_GEN_API_KEY,
+    }
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=IMAGE_GEN_TIMEOUT) as client:
+            res = await client.post(url, headers=headers, json=payload)
+            if res.status_code >= 400:
+                logger.warning(f"[IMAGE] Gemini generation failed: {res.status_code} {res.text[:300]}")
+                return None
+            data = res.json()
+            # Extract image from response parts
+            candidates = data.get("candidates", [])
+            if not candidates:
+                logger.warning("[IMAGE] Gemini: no candidates in response")
+                return None
+            parts = candidates[0].get("content", {}).get("parts", [])
+            for part in parts:
+                inline_data = part.get("inlineData")
+                if inline_data and inline_data.get("mimeType", "").startswith("image/"):
+                    mime = inline_data["mimeType"]
+                    b64 = inline_data["data"]
+                    return f"data:{mime};base64,{b64}"
+            logger.warning("[IMAGE] Gemini: no image parts in response")
+            return None
+    except Exception as e:
+        logger.warning(f"[IMAGE] Gemini generation error: {e}")
+        return None
+
+
+async def _generate_image_grok(prompt: str) -> Optional[str]:
+    """Generate image via xAI Grok Imagine API (OpenAI-like but with aspect_ratio/resolution)."""
+    payload = {
+        "model": IMAGE_GEN_MODEL or "grok-imagine-image",
+        "prompt": prompt,
+        "n": 1,
+        "aspect_ratio": "16:9",
+        "response_format": "b64_json",
+    }
+
+    headers = {
+        "Authorization": f"Bearer {IMAGE_GEN_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    url = IMAGE_GEN_BASE_URL.rstrip("/") + "/images/generations"
+
+    try:
+        async with httpx.AsyncClient(timeout=IMAGE_GEN_TIMEOUT) as client:
+            res = await client.post(url, headers=headers, json=payload)
+            if res.status_code >= 400:
+                logger.warning(f"[IMAGE] Grok generation failed: {res.status_code} {res.text[:500]}")
+                return None
+            data = res.json()
+            b64 = data.get("data", [{}])[0].get("b64_json")
+            if not b64:
+                logger.warning("[IMAGE] Grok: no b64_json in response")
+                return None
+            return f"data:image/jpeg;base64,{b64}"
+    except Exception as e:
+        logger.warning(f"[IMAGE] Grok generation error: {e}")
         return None
 
 
@@ -1803,7 +2031,9 @@ async def generate_slides(request: SlideDeckGenerateRequest):
 
     if not db_service:
         raise HTTPException(status_code=503, detail="Database not available")
-    if not ollama_client:
+    # Prefer slide_html_client (Gemini) for slide generation, fall back to main client
+    slide_llm = slide_html_client or ollama_client
+    if not slide_llm:
         raise HTTPException(status_code=503, detail="LLM not available")
 
     started = time.time()
@@ -1813,30 +2043,40 @@ async def generate_slides(request: SlideDeckGenerateRequest):
     max_slides = int(request.max_slides or 8)
     max_slides = max(1, min(max_slides, 20))
 
+    # Use enhanced prompt/system when high-capability LLM is available
+    use_enhanced = slide_html_client is not None and slide_llm is slide_html_client
+
     try:
         search_results = await retrieve_sources_for_slides(
             question=question,
             mode=mode,
             db_service=db_service,
-            ai_client=ollama_client,
+            ai_client=ollama_client or slide_llm,
             top_k_override=request.top_k,
         )
-        sources_for_prompt = format_slide_sources_for_prompt(search_results)
+        sources_for_prompt = format_slide_sources_for_prompt(
+            search_results,
+            max_sources=8 if use_enhanced else 6,
+            max_chars_per_source=800 if use_enhanced else 500,
+        )
 
         prompt = build_generate_slide_prompt(
             question=question,
             answer=request.answer,
             sources=sources_for_prompt,
             max_slides=max_slides,
+            enhanced=use_enhanced,
         )
 
+        system_prompt = SLIDE_SYSTEM_PROMPT_ENHANCED if use_enhanced else SLIDE_SYSTEM_PROMPT
         fallback_reason: Optional[str] = None
+        logger.info(f"[SLIDES] Generate using {slide_llm.model} via {slide_llm.base_url} (enhanced={use_enhanced})")
         try:
             deck_raw, err = await asyncio.wait_for(
-                ollama_client.generate_json(
+                slide_llm.generate_json(
                     prompt=prompt,
                     temperature=0.2,
-                    system=SLIDE_SYSTEM_PROMPT,
+                    system=system_prompt,
                 ),
                 timeout=slide_timeout,
             )
@@ -1871,6 +2111,8 @@ async def generate_slides(request: SlideDeckGenerateRequest):
             "generation_time_seconds": round(time.time() - started, 2),
             "fallback": fallback_reason is not None,
             "warning": fallback_reason,
+            "enhanced": use_enhanced,
+            "slide_model": slide_llm.model if slide_llm else None,
         }
     except HTTPException:
         raise
@@ -1888,7 +2130,9 @@ async def refine_slides(request: SlideDeckRefineRequest):
 
     if not db_service:
         raise HTTPException(status_code=503, detail="Database not available")
-    if not ollama_client:
+    # Prefer slide_html_client (Gemini) for slide refinement, fall back to main client
+    slide_llm = slide_html_client or ollama_client
+    if not slide_llm:
         raise HTTPException(status_code=503, detail="LLM not available")
 
     started = time.time()
@@ -1903,7 +2147,7 @@ async def refine_slides(request: SlideDeckRefineRequest):
             question=question,
             mode=mode,
             db_service=db_service,
-            ai_client=ollama_client,
+            ai_client=ollama_client or slide_llm,
             top_k_override=request.top_k,
         )
         sources_for_prompt = format_slide_sources_for_prompt(search_results)
@@ -1916,13 +2160,16 @@ async def refine_slides(request: SlideDeckRefineRequest):
             max_slides=max_slides,
         )
 
+        use_enhanced = slide_html_client is not None and slide_llm is slide_html_client
+        system_prompt = SLIDE_SYSTEM_PROMPT_ENHANCED if use_enhanced else SLIDE_SYSTEM_PROMPT
         fallback_reason: Optional[str] = None
+        logger.info(f"[SLIDES] Refine using {slide_llm.model} via {slide_llm.base_url} (enhanced={use_enhanced})")
         try:
             deck_raw, err = await asyncio.wait_for(
-                ollama_client.generate_json(
+                slide_llm.generate_json(
                     prompt=prompt,
                     temperature=0.2,
-                    system=SLIDE_SYSTEM_PROMPT,
+                    system=system_prompt,
                 ),
                 timeout=slide_timeout,
             )
@@ -1976,6 +2223,596 @@ async def generate_slide_image(request: SlideImageRequest):
     if not data_url:
         raise HTTPException(status_code=500, detail="Image generation failed")
     return {"data_url": data_url}
+
+
+# ============================================================
+# Visual Slide Endpoints (image-based slide generation)
+# ============================================================
+
+@app.get("/pipeline/slides/visual/presets")
+async def get_visual_slide_presets():
+    """Return available style presets for visual slide generation."""
+    presets = {
+        key: {"label": v["label"], "description": v["description"]}
+        for key, v in STYLE_PRESETS.items()
+    }
+    return {"presets": presets, "default": DEFAULT_PRESET}
+
+
+@app.post("/pipeline/slides/visual/outline")
+async def generate_visual_slide_outline(request: VisualSlideOutlineRequest):
+    """
+    Phase 1: Build slide outline.
+    When use_llm=True, uses the slide HTML LLM (e.g. Gemini) for a richer outline.
+    Falls back to rule-based parsing when LLM is unavailable or fails.
+    """
+    import time
+
+    started = time.time()
+    question = request.question
+    max_slides = max(3, min(int(request.max_slides or 15), 20))
+    style_preset = request.style_preset or DEFAULT_PRESET
+    if style_preset not in STYLE_PRESETS:
+        style_preset = DEFAULT_PRESET
+
+    try:
+        llm_used = False
+        outline_client = slide_html_client or ai_client
+
+        if request.use_llm and outline_client:
+            logger.info(f"[VISUAL_SLIDES] LLM outline request: max_slides={max_slides}, answer_len={len(request.answer or '')}")
+            outline = await build_outline_with_llm(
+                question=question,
+                answer=request.answer,
+                client=outline_client,
+                max_slides=max_slides,
+            )
+            llm_used = True
+        else:
+            logger.info(f"[VISUAL_SLIDES] Rule-based outline request: max_slides={max_slides}, answer_len={len(request.answer or '')}")
+            outline = build_outline_from_answer(
+                question=question,
+                answer=request.answer,
+                max_slides=max_slides,
+            )
+
+        logger.info(f"[VISUAL_SLIDES] Outline generated: {len(outline.get('slides', []))} slides (llm={llm_used})")
+
+        presets_summary = {
+            key: {"label": v["label"], "description": v["description"]}
+            for key, v in STYLE_PRESETS.items()
+        }
+
+        return {
+            "outline": outline,
+            "style_preset": style_preset,
+            "sources": [],
+            "presets": presets_summary,
+            "generation_time_seconds": round(time.time() - started, 2),
+            "llm_used": llm_used,
+        }
+
+    except Exception as e:
+        logger.error(f"[VISUAL_SLIDES] Outline failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/visual/renderhtml")
+async def render_slide_html(request: VisualSlideRenderHtmlRequest):
+    """
+    Generate styled HTML for a single slide using the dedicated Slide HTML LLM (e.g. Gemini).
+    Falls back to main ai_client if slide_html_client is not configured.
+    Optionally generates an image and embeds it into the HTML.
+    """
+    client = slide_html_client or ai_client
+    if not client:
+        raise HTTPException(status_code=503, detail="LLM not available")
+
+    logger.info(f"[VISUAL_SLIDES] renderhtml: slide_title='{request.slide.get('title', '')}', preset='{request.style_preset}', client={client.model}@{client.base_url}")
+
+    style_preset = request.style_preset or DEFAULT_PRESET
+    if style_preset not in STYLE_PRESETS:
+        style_preset = DEFAULT_PRESET
+
+    # pptx-cards preset generates HTML on the frontend — no LLM needed
+    if style_preset == "pptx-cards":
+        return {"html": "", "skip": True}
+
+    slide = request.slide
+    slide_type = slide.get("type", "content")
+
+    # Optionally generate image for content slides
+    image_data_url: Optional[str] = None
+    has_image = False
+    if IMAGE_GEN_ENABLED and slide_type == "content":
+        visual_desc = slide.get("visual_description", "").strip()
+        if visual_desc:
+            image_prompt = f"Clean flat illustration for a presentation slide: {visual_desc}. Style: professional, minimal, no text, 16:9 aspect ratio."
+            image_data_url = await generate_image_data_url(image_prompt)
+            if image_data_url:
+                has_image = True
+
+    prompt = build_slide_html_prompt(
+        slide=slide,
+        style_preset=style_preset,
+        deck_title=request.deck_title,
+        has_image=has_image,
+    )
+
+    try:
+        result = await client.generate(
+            prompt=prompt,
+            system=SLIDE_HTML_SYSTEM_PROMPT,
+            temperature=0.3,
+        )
+
+        fallback_used = False
+        if not result.success or not result.text.strip():
+            logger.warning(f"[VISUAL_SLIDES] LLM generation failed (success={result.success}, error={result.error}), using fallback HTML")
+            html = generate_fallback_html(
+                slide=slide,
+                style_preset=style_preset,
+                deck_title=request.deck_title,
+            )
+            fallback_used = True
+        else:
+            html = extract_html_from_response(result.text)
+            if not html.strip() or "<div" not in html.lower():
+                logger.warning(f"[VISUAL_SLIDES] LLM returned non-HTML response (len={len(result.text)}), using fallback. Response preview: {result.text[:200]}")
+                html = generate_fallback_html(
+                    slide=slide,
+                    style_preset=style_preset,
+                    deck_title=request.deck_title,
+                )
+                fallback_used = True
+
+        # Replace IMAGE_PLACEHOLDER with actual generated image
+        if has_image and image_data_url and IMAGE_PLACEHOLDER in html:
+            html = html.replace(
+                IMAGE_PLACEHOLDER,
+                f'<img src="{image_data_url}" style="max-width:100%;max-height:100%;object-fit:contain;" />'
+            )
+
+        return {"html": html, "has_image": has_image, "fallback": fallback_used}
+    except Exception as e:
+        logger.error(f"[VISUAL_SLIDES] render-html failed: {e}")
+        # Return fallback HTML instead of 500 error so the user sees content
+        try:
+            html = generate_fallback_html(
+                slide=slide,
+                style_preset=style_preset,
+                deck_title=request.deck_title,
+            )
+            return {"html": html, "has_image": False, "fallback": True, "error": str(e)}
+        except Exception:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# History & Template Endpoints
+# ============================================================
+
+@app.get("/history/qa")
+async def get_qa_history(limit: int = 50, offset: int = 0):
+    """Get Q&A conversation history list."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    items = db_service.get_qa_history(limit=limit, offset=offset)
+    return {"items": items}
+
+
+@app.post("/history/qa")
+async def save_qa_history(data: QAConversationSave):
+    """Save a Q&A conversation to history."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        qa_id = db_service.save_qa_conversation(
+            question=data.question,
+            answer=data.answer,
+            sources=data.sources,
+            confidence=data.confidence,
+            has_answer=data.has_answer if data.has_answer is not None else True,
+            search_time=data.search_time,
+            mode=data.mode,
+            from_cache=data.from_cache if data.from_cache is not None else False,
+        )
+        return {"id": qa_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/qa/{qa_id}")
+async def get_qa_detail(qa_id: int):
+    """Get a single Q&A conversation detail."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    result = db_service.get_qa_detail(qa_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="QA conversation not found")
+    return result
+
+
+@app.patch("/history/qa/{qa_id}")
+async def rename_qa_history(qa_id: int, data: dict):
+    """Rename a Q&A conversation (update question text)."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    new_name = data.get("question") or data.get("name")
+    if not new_name:
+        raise HTTPException(status_code=400, detail="question or name is required")
+    try:
+        db_service.rename_qa_conversation(qa_id, new_name)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/history/qa/{qa_id}")
+async def delete_qa_history(qa_id: int):
+    """Delete a Q&A conversation."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        db_service.delete_qa_conversation(qa_id)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/history/slides/{deck_id}")
+async def rename_slide_history(deck_id: int, data: dict):
+    """Rename a slide deck title."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    new_title = data.get("title") or data.get("name")
+    if not new_title:
+        raise HTTPException(status_code=400, detail="title or name is required")
+    try:
+        db_service.rename_slide_deck(deck_id, new_title)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/slides")
+async def get_slide_history(limit: int = 50, offset: int = 0):
+    """Get slide deck history list."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    items = db_service.get_slide_history(limit=limit, offset=offset)
+    return {"items": items}
+
+
+@app.post("/history/slides")
+async def save_slide_history(data: SlideDeckSave):
+    """Save a slide deck with all pages."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        deck_id = db_service.save_slide_deck(
+            title=data.title,
+            question=data.question,
+            answer=data.answer,
+            plan_md=data.plan_md,
+            style_options=data.style_options,
+            slides=[s.model_dump() for s in data.slides],
+        )
+        return {"id": deck_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/history/slides/{deck_id}")
+async def update_slide_history(deck_id: int, data: SlideDeckUpdate):
+    """Update an existing slide deck."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    # Check if deck exists
+    existing = db_service.get_slide_deck_detail(deck_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Slide deck not found")
+    try:
+        db_service.update_slide_deck(
+            deck_id=deck_id,
+            slides=[s.model_dump() for s in data.slides],
+            style_options=data.style_options,
+        )
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/slides/{deck_id}")
+async def get_slide_detail(deck_id: int):
+    """Get a slide deck with all pages."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    result = db_service.get_slide_deck_detail(deck_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Slide deck not found")
+    return result
+
+
+@app.delete("/history/slides/{deck_id}")
+async def delete_slide_history(deck_id: int):
+    """Delete a slide deck."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    existing = db_service.get_slide_deck_detail(deck_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Slide deck not found")
+    try:
+        db_service.delete_slide_deck(deck_id)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/templates/slides")
+async def get_slide_templates():
+    """Get all slide templates."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    templates = db_service.get_slide_templates()
+    return {"items": templates}
+
+
+@app.post("/templates/slides")
+async def save_slide_template(data: SlideTemplateSave):
+    """Save or update a slide template (UPSERT by name+position).
+    For image templates, runs Vision analysis to detect logos, headers, safe areas."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if data.position not in ("first", "middle", "last"):
+        raise HTTPException(status_code=400, detail="position must be 'first', 'middle', or 'last'")
+    try:
+        # Analyze image templates using Vision API
+        metadata: dict = {}
+        if 'data-image-template="true"' in data.html:
+            img_match = re.search(r'src="data:image/[^;]+;base64,([^"]+)"', data.html)
+            if img_match:
+                analysis_client = slide_html_client or ai_client
+                if analysis_client:
+                    try:
+                        from src.agents.visual_slide_agent import analyze_template_image
+                        metadata = await analyze_template_image(img_match.group(1), analysis_client)
+                        logger.info(f"[TEMPLATE] Vision analysis complete: {list(metadata.keys())}")
+                    except Exception as analysis_err:
+                        logger.warning(f"[TEMPLATE] Vision analysis failed (saving without): {analysis_err}")
+
+        template_id = db_service.save_slide_template(
+            name=data.name,
+            position=data.position,
+            html=data.html,
+            header_color=data.header_color,
+            footer_color=data.footer_color,
+            metadata=metadata or None,
+        )
+        return {"id": template_id, "metadata": metadata}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/templates/slides/{template_id}")
+async def delete_slide_template(template_id: int):
+    """Delete a slide template."""
+    if not db_service:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        db_service.delete_slide_template(template_id)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# HTML Slide Pipeline
+# ============================================================
+
+@app.post("/pipeline/slides/htmlslide/plan")
+async def html_slide_plan(request: HtmlSlidePlanRequest):
+    """
+    Step 1 of HTML Slide pipeline: Generate a Markdown plan for the slide deck.
+    Returns the plan text and slide count.
+    """
+    import time
+
+    client = slide_html_client or ai_client
+    if not client:
+        raise HTTPException(status_code=503, detail="LLM not available")
+
+    max_slides = request.max_slides or 12
+
+    logger.info(f"[HTML_SLIDES] plan: question='{request.question[:60]}', max_slides={max_slides}, style_options={request.style_options}")
+
+    start = time.time()
+    try:
+        plan_result = await generate_slide_plan_md(
+            question=request.question,
+            answer=request.answer,
+            client=client,
+            max_slides=max_slides,
+            style_options=request.style_options,
+        )
+
+        plan_md = plan_result["plan_md"]
+        _deck_title, slides_parsed = parse_slide_plan_md(plan_md)
+        elapsed = time.time() - start
+        source = plan_result.get("source", "unknown")
+        logger.info(f"[HTML_SLIDES] plan generated: {len(slides_parsed)} slides in {elapsed:.1f}s, source={source}")
+
+        return {
+            "plan_md": plan_md,
+            "slides_count": len(slides_parsed),
+            "generation_time_seconds": round(elapsed, 2),
+            # Diagnostic info for frontend
+            "plan_source": source,
+            "plan_model": plan_result.get("model"),
+            "plan_error": plan_result.get("error"),
+            "prompt_len": plan_result.get("prompt_len"),
+        }
+    except Exception as e:
+        logger.error(f"[HTML_SLIDES] plan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/htmlslide/render")
+async def html_slide_render(request: HtmlSlideRenderRequest):
+    """
+    Step 2 of HTML Slide pipeline: Render a single slide from its MD plan section into HTML.
+    """
+    client = slide_html_client or ai_client
+    if not client:
+        raise HTTPException(status_code=503, detail="LLM not available")
+
+    logger.info(f"[HTML_SLIDES] render: slide {request.slide_index + 1}/{request.total_slides}, type={request.slide_type}")
+
+    # ---- Load template from DB only when explicitly requested ----
+    template_html = None
+    template_header_color = None
+    template_footer_color = None
+    template_metadata = None
+    if request.use_templates and db_service:
+        try:
+            if request.slide_index == 0:
+                position = "first"
+            elif request.slide_index == request.total_slides - 1:
+                position = "last"
+            else:
+                position = "middle"
+            tpl = db_service.get_slide_template_by_position(position)
+            if tpl:
+                template_html = tpl.get("html")
+                template_header_color = tpl.get("header_color")
+                template_footer_color = tpl.get("footer_color")
+                template_metadata = tpl.get("metadata") or {}
+                logger.info(f"[HTML_SLIDES] Using template '{tpl.get('name')}' for position={position}, metadata_keys={list(template_metadata.keys()) if template_metadata else 'none'}")
+        except Exception as e:
+            logger.warning(f"[HTML_SLIDES] Template load failed: {e}, proceeding without template")
+
+    try:
+        html = await render_slide_from_plan(
+            slide_section=request.slide_plan_section,
+            slide_title=request.slide_title,
+            slide_index=request.slide_index,
+            total_slides=request.total_slides,
+            deck_title=request.deck_title,
+            slide_type=request.slide_type,
+            client=client,
+            style_options=request.style_options,
+            template_html=template_html,
+            template_header_color=template_header_color,
+            template_footer_color=template_footer_color,
+            template_metadata=template_metadata,
+        )
+
+        # Check if fallback was used
+        fallback = not html.strip() or "generate_fallback_html" in html[:50]
+
+        return {"html": html, "fallback": fallback}
+    except Exception as e:
+        logger.error(f"[HTML_SLIDES] render failed for slide {request.slide_index + 1}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/pipeline/slides/visual/generate")
+async def generate_visual_slides(request: VisualSlideGenerateRequest):
+    """
+    Phase 2: Generate slide images from outline via SSE streaming.
+    Uses asyncio.Semaphore(3) for parallel image generation.
+    """
+    import time
+    import json as json_mod
+
+    if not IMAGE_GEN_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Image generation is disabled (IMAGE_GEN_ENABLED=false)",
+        )
+
+    outline = request.outline
+    slides = outline.get("slides") or []
+    if not slides:
+        raise HTTPException(status_code=400, detail="Outline has no slides")
+
+    deck_title = str(outline.get("title") or request.question).strip()
+    style_preset = request.style_preset or DEFAULT_PRESET
+    if style_preset not in STYLE_PRESETS:
+        style_preset = DEFAULT_PRESET
+
+    total = len(slides)
+    semaphore = asyncio.Semaphore(3)
+    results: dict[int, dict[str, Any]] = {}
+
+    async def generate_one(idx: int, slide: dict) -> None:
+        async with semaphore:
+            prompt = build_slide_image_prompt(
+                slide=slide,
+                style_preset=style_preset,
+                deck_title=deck_title,
+            )
+            try:
+                data_url = await generate_image_data_url(prompt, size="1792x1024")
+                if data_url:
+                    results[idx] = {
+                        "type": "slide_complete",
+                        "slide_index": idx,
+                        "total": total,
+                        "image_data_url": data_url,
+                        "title": slide.get("title", f"Slide {idx + 1}"),
+                    }
+                else:
+                    results[idx] = {
+                        "type": "error",
+                        "slide_index": idx,
+                        "error": "Image generation returned empty result",
+                    }
+            except Exception as e:
+                logger.warning(f"[VISUAL_SLIDES] Slide {idx} image failed: {e}")
+                results[idx] = {
+                    "type": "error",
+                    "slide_index": idx,
+                    "error": str(e),
+                }
+
+    async def event_stream():
+        # Start event
+        yield f"data: {json_mod.dumps({'type': 'start', 'total': total, 'style': style_preset})}\n\n"
+
+        # Launch all tasks
+        tasks = [
+            asyncio.create_task(generate_one(i, slide))
+            for i, slide in enumerate(slides)
+        ]
+
+        # Poll for completed results and stream them as they finish
+        completed_sent: set[int] = set()
+        while len(completed_sent) < total:
+            await asyncio.sleep(0.5)
+            for idx in range(total):
+                if idx in results and idx not in completed_sent:
+                    yield f"data: {json_mod.dumps(results[idx])}\n\n"
+                    completed_sent.add(idx)
+
+        # Ensure all tasks are done
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Done event
+        completed_count = sum(
+            1 for r in results.values() if r.get("type") == "slide_complete"
+        )
+        yield f"data: {json_mod.dumps({'type': 'done', 'total': total, 'completed_count': completed_count})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 if __name__ == "__main__":

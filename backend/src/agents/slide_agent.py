@@ -28,6 +28,7 @@ SLIDE_SYSTEM_PROMPT = """あなたは社内文書の内容に基づいて、プ�
 3. 各スライドは要点だけ（箇条書き中心、1スライド3〜6項目）
 4. 可能な限り、各スライドに根拠（citations）を付ける
 5. citations の quote は短い抜粋（120文字以内）
+6. スライド枚数は内容の量に応じて調整する（固定枚数にしない）
 
 スライドレイアウトのガイドライン:
 - 最初のスライドは概要・タイトルスライドにする（layout: "title"）
@@ -37,11 +38,80 @@ SLIDE_SYSTEM_PROMPT = """あなたは社内文書の内容に基づいて、プ�
 - 図解が重要な場合は layout: "visual" を指定する
 - 通常の説明は layout: "content" （デフォルト）
 
-視覚要素の選び方:
-- diagram_mermaid: プロセスフロー、階層構造、シーケンスに最適
-- table: 項目比較、仕様一覧、チェックリストに最適
-- chart: 数値データ、トレンド、割合比較に最適（bar/line/pie）
-- image_prompt: 概念図、アイコン風イラストが必要な場合
+視覚要素の選び方（内容に合わせて選択）:
+- diagram_mermaid: プロセスフロー、階層構造、シーケンスを説明する場合
+- table: 複数項目の比較、仕様一覧がある場合
+- chart: 文書に具体的な数値データがある場合（bar/line/pie）
+- image_prompt: 物・製品・概念を説明する場合にイメージ画像を生成するための説明文（英語推奨）
+  - 例: "jellyfish swimming in deep ocean, photorealistic, blue tones"
+  - 例: "modern office building exterior, corporate style, clean"
+  - 物やシーンを説明するスライドには積極的に image_prompt を付ける
+- 内容に合うものがない場合のみ、何も付けなくてよい
+"""
+
+# Enhanced system prompt for high-capability LLMs (Gemini, etc.)
+SLIDE_SYSTEM_PROMPT_ENHANCED = """あなたは社内文書からプロフェッショナルなプレゼンテーション資料を作成する専門家です。
+与えられた「参考文書（検索結果）」の内容のみに基づき、質の高いスライド資料を作成してください。
+
+## 基本ルール
+1. 出力は必ず JSON のみ（説明文なし）
+2. 文書に書かれていない情報は推測しない
+3. 各スライドは要点を明確に整理（箇条書き中心、1スライド3〜6項目）
+4. 可能な限り、各スライドに根拠（citations）を付ける
+5. citations の quote は短い抜粋（120文字以内）
+6. スライド枚数は内容の量・構造に応じて柔軟に調整する
+
+## スライド構成のベストプラクティス
+内容に応じて必要なスライドを作成してください（全てを使う必要はない）:
+- **タイトルスライド** (layout: "title"): テーマ、サブタイトル、概要を簡潔に
+- **背景・経緯** (layout: "content"): 問題の背景を説明
+- **詳細分析** (layout: "content" / "table" / "chart"): 深掘り分析
+- **比較・整理** (layout: "table"): 項目の比較表
+- **プロセス・フロー** (layout: "visual"): ワークフロー図
+- **データ・数値** (layout: "chart"): グラフで可視化
+- **まとめ・提案** (layout: "content"): 結論とアクション
+
+## レイアウト選択ガイド
+
+### layout: "title"
+- 最初のスライドに必ず使用
+
+### layout: "content"
+- 通常の説明スライド
+- bullets を3〜6項目、それぞれ短く簡潔に
+
+### layout: "table"
+- 複数項目の比較データがある場合に使用
+- table.headers + table.rows を指定
+
+### layout: "chart"
+- 文書に具体的な数値データがある場合に使用（合成データは使わない）
+- chart.type: "bar" / "line" / "pie"
+
+### layout: "visual"
+- プロセス・手順・ワークフローがある場合に使用
+- diagram_mermaid でフローチャートやシーケンス図を記述
+
+## 視覚要素の選び方（内容に合わせて選択）
+各スライドに、内容に最も合う視覚要素を選んでください:
+
+- **diagram_mermaid**: プロセス・手順・ワークフロー → フローチャート
+- **table**: 複数項目の比較・一覧 → 比較表
+- **chart**: 具体的な数値データ → グラフ（文書根拠のある数値のみ）
+- **image_prompt**: 物・製品・生物・場所・概念の説明 → イメージ画像を生成
+  - 英語で具体的に記述する
+  - 例: "jellyfish swimming in deep blue ocean, photorealistic, soft lighting"
+  - 例: "modern server room with blue LED lighting, corporate data center"
+  - 例: "team brainstorming around whiteboard, flat illustration style"
+  - 物やシーンを説明するスライドには積極的に image_prompt を付ける
+- diagram/table/chart のどれにも該当せず、画像も不要な場合のみ、何も付けない
+
+## スライド数のガイド
+- 内容の量・構造に応じて柔軟に決定する
+- 簡単なトピック: 4〜6枚
+- 中程度のトピック: 6〜10枚
+- 複雑なトピック: 8〜12枚
+- 内容が薄いスライドは作らない
 """
 
 
@@ -119,86 +189,76 @@ def _build_fallback_slides(
     seed_points: list[str],
     max_slides: int,
 ) -> list[dict[str, Any]]:
-    target = max(3, min(max_slides, 20))  # Allow up to 20 slides
-    themes = [
-        "概要",
-        "主要ポイント",
-        "ワークフロー",
-        "比較・整理",
-        "実行計画",
-        "まとめ",
-        "詳細分析",
-        "背景・経緯",
-        "課題と対策",
-        "今後の展望",
-        "補足情報",
-        "参考データ",
-        "Q&A",
-        "アクションアイテム",
-        "スケジュール",
-        "リソース",
-        "コスト分析",
-        "リスク管理",
-        "成功指標",
-        "結論",
-    ]
+    """
+    Build fallback slides from actual content (seed_points).
+    Groups seed points into content slides and adds a title + summary.
+    No forced visual elements — only bullets based on real content.
+    """
     slides: list[dict[str, Any]] = []
+
+    # Title slide
+    slides.append({
+        "title": _compact_text(question, 50),
+        "layout": "title",
+        "bullets": [_compact_text(seed_points[0], 90)] if seed_points else ["概要"],
+        "diagram_mermaid": "",
+        "table": None,
+        "image_url": "",
+        "image_prompt": "",
+        "chart": None,
+        "speaker_notes": "",
+        "citations": [],
+    })
+
+    # Content slides: group seed points into slides of 4 bullets each
+    # Reserve 1 slot for title, 1 for summary
+    content_slots = max(1, min(max_slides - 2, 18))
+    points_per_slide = max(3, min(6, -(-len(seed_points) // content_slots) if seed_points else 4))
     cursor = 0
+    slide_num = 0
 
-    def pick_points(count: int) -> list[str]:
-        nonlocal cursor
-        out: list[str] = []
-        while cursor < len(seed_points) and len(out) < count:
-            out.append(seed_points[cursor])
-            cursor += 1
-        return out
+    while cursor < len(seed_points) and slide_num < content_slots:
+        bullets = seed_points[cursor : cursor + points_per_slide]
+        cursor += points_per_slide
+        slide_num += 1
 
-    for i in range(target):
-        theme = themes[i]
-        title = f"{theme}: {question}" if i == 0 else theme
-        bullets = pick_points(4)
-        if len(bullets) < 3:
-            bullets.extend(
-                [
-                    _compact_text(f"{theme}の要点を明確化する", 90),
-                    _compact_text("文書の根拠と背景を整理する", 90),
-                    _compact_text("次の判断・アクションにつなげる", 90),
-                ][: max(0, 3 - len(bullets))]
-            )
+        # Use first bullet as a rough title
+        title_text = bullets[0] if bullets else f"ポイント {slide_num}"
+        title_text = _compact_text(title_text, 40)
 
-        # Determine appropriate layout based on theme
-        if i == 0:
-            layout = "title"
-        elif theme in ("比較・整理",):
-            layout = "table"
-        elif theme in ("ワークフロー",):
-            layout = "visual"
-        else:
-            layout = "content"
-
-        slide: dict[str, Any] = {
-            "title": _compact_text(title, 50),
-            "layout": layout,
-            "bullets": bullets[:8],
+        slides.append({
+            "title": title_text,
+            "layout": "content",
+            "bullets": [_compact_text(b, 90) for b in bullets],
             "diagram_mermaid": "",
             "table": None,
             "image_url": "",
-            "image_prompt": (
-                "minimal flat icon illustration, clean corporate style, "
-                f"topic: {theme}"
-            ),
+            "image_prompt": "",
             "chart": None,
             "speaker_notes": "",
             "citations": [],
-        }
-        if i in (0, 2):
-            slide["diagram_mermaid"] = _build_default_mermaid(slide["title"], slide["bullets"])
-        elif i in (1, 4):
-            slide["table"] = _build_default_table(slide["bullets"])
-        else:
-            slide["chart"] = _build_default_chart(slide["bullets"])
-        slides.append(slide)
-    return slides
+        })
+
+    # Summary slide (summarizes previous content, no new info)
+    if len(slides) > 1:
+        summary_bullets = []
+        for s in slides[1:]:  # Skip title
+            if s.get("bullets"):
+                summary_bullets.append(_compact_text(s["bullets"][0], 60))
+        slides.append({
+            "title": "まとめ",
+            "layout": "content",
+            "bullets": summary_bullets[:6] or ["要点を整理する"],
+            "diagram_mermaid": "",
+            "table": None,
+            "image_url": "",
+            "image_prompt": "",
+            "chart": None,
+            "speaker_notes": "",
+            "citations": [],
+        })
+
+    return slides[:max(1, min(max_slides, 20))]
 
 
 def _compact_text(text: str, max_chars: int) -> str:
@@ -283,7 +343,12 @@ def build_generate_slide_prompt(
     answer: Optional[str],
     sources: list[dict[str, Any]],
     max_slides: int,
+    enhanced: bool = False,
 ) -> str:
+    if enhanced:
+        return _build_enhanced_slide_prompt(
+            question=question, answer=answer, sources=sources, max_slides=max_slides
+        )
     return f"""以下の情報をもとに、NotebookLMのような「スライド資料」を作ってください。
 
 ## 質問
@@ -308,23 +373,108 @@ def build_generate_slide_prompt(
 - "table": 比較表・一覧が主役のスライド
 - "chart": グラフ・データ可視化が主役のスライド
 
-## 視覚要素の選び方
-各スライドに最低1つの視覚要素を入れる：
-- diagram_mermaid: プロセスフロー、階層、シーケンスに最適
-  - 例: flowchart TD, sequenceDiagram, classDiagram
-- table: 項目比較、仕様一覧、チェックリストに最適
-  - headers と rows を両方指定
-- chart: 数値データ、トレンド、割合に最適
-  - type: bar（棒）, line（折れ線）, pie（円）
-  - labels と datasets を指定
-- image_prompt: 概念的なアイコン・イラストが必要な場合
-  - 抽象的な表現で、具体的な数値や固有名は避ける
+## 視覚要素の選び方（内容に合わせて選択）
+- diagram_mermaid: プロセス・手順・ワークフローがある場合
+- table: 複数項目の比較データがある場合
+- chart: 文書に具体的な数値データがある場合
+- image_prompt: 物・製品・生物・概念を説明する場合、イメージ画像生成用の説明文（英語）
+  - 例: "jellyfish swimming in deep ocean, photorealistic"
+  - 物やシーンを説明するスライドには積極的に使う
+- どれにも該当しない場合のみ、何も付けなくてよい
 
 ## 重要なルール
 - image_url は参考文書に明記されている場合のみ使用
-- chart の数値は参考文書に根拠がある場合のみ使用
+- chart の数値は参考文書に根拠がある場合のみ使用（合成データ禁止）
 - 文書にない情報は推測しない
 - citations を可能な限り付ける（quote は120文字以内）
+- スライド枚数は内容に応じて調整する（固定枚数にしない）
+
+## 出力形式（JSONのみ）
+{json.dumps(SLIDE_DECK_JSON_SCHEMA, ensure_ascii=False)}
+"""
+
+
+def _build_enhanced_slide_prompt(
+    *,
+    question: str,
+    answer: Optional[str],
+    sources: list[dict[str, Any]],
+    max_slides: int,
+) -> str:
+    """Enhanced prompt for high-capability LLMs (Gemini, etc.) that produces richer slide decks."""
+    return f"""以下の情報をもとに、プロフェッショナルなプレゼンテーション資料を作成してください。
+NotebookLMのようなリッチで読みやすい資料が目標です。
+
+## 質問
+{question}
+
+## 既存の回答（参考。矛盾する場合は参考文書を優先）
+{answer or "（なし）"}
+
+## 参考文書（検索結果）
+{json.dumps(sources, ensure_ascii=False, indent=2)}
+
+## 出力要件
+- **スライド枚数**: 最大 {max_slides} 枚。内容の豊富さに応じて枚数を調整
+  - 簡単なトピック: 4〜6枚
+  - 中程度: 6〜8枚
+  - 複雑なトピック: 8〜{max_slides}枚
+- 1枚あたり 3〜6 bullet（空配列にしない）
+- bullets は短く簡潔に（1行で読める長さ）
+- 内容が薄いスライドは作らない
+
+## スライド構成のガイド
+以下のような構成を参考にしてください（全て必須ではない）:
+1. **タイトル** (layout: "title"): テーマとサブタイトル
+2. **目次/概要** (layout: "content"): 全体の流れ
+3. **背景・経緯** (layout: "content"): 問題の背景
+4. **主要ポイント** (layout: "content" / "table"): 核心的な内容
+5. **詳細分析** (layout: "content" / "chart"): データや分析
+6. **プロセス/フロー** (layout: "visual"): ワークフロー
+7. **比較・整理** (layout: "table"): 比較表
+8. **まとめ・提案** (layout: "content"): 結論とアクション
+
+## 視覚要素の選び方（内容に合わせて選択）
+
+### diagram_mermaid — プロセス・手順・ワークフロー
+```
+flowchart TD
+  A[開始] --> B[処理1]
+  B --> C{{判断}}
+  C -->|Yes| D[処理2]
+  C -->|No| E[処理3]
+```
+- ノード名はスライド内容に基づく実際のステップ名
+
+### table — 複数項目の比較・一覧
+- headers + rows で実際のデータを表現
+
+### chart — 具体的な数値データ
+- type: "bar" / "line" / "pie"
+- 文書に根拠のある数値のみ使用
+
+### image_prompt — 物・製品・生物・場所・概念のイメージ画像
+- 英語で具体的に記述（画像生成AIに渡すプロンプト）
+- 例: "jellyfish swimming in deep blue ocean, photorealistic, soft lighting"
+- 例: "modern data center with server racks, blue LED lighting"
+- 例: "team collaborating around a whiteboard, flat illustration, warm colors"
+- 物やシーンを説明するスライドには積極的に付ける
+
+### どれにも該当しない場合
+- bullets のみで十分
+
+## 品質チェック
+- 各スライドのタイトルは簡潔で具体的か
+- bullets が冗長でないか
+- 視覚要素は内容と一致しているか
+- citations が付いているか
+- スライド枚数は内容の量に適切か
+
+## 重要なルール
+- chart の数値は文書根拠のみ使用（合成データ禁止）
+- 文書にない情報は推測しない
+- citations を可能な限り付ける
+- スライド枚数は内容に応じて柔軟に調整
 
 ## 出力形式（JSONのみ）
 {json.dumps(SLIDE_DECK_JSON_SCHEMA, ensure_ascii=False)}
@@ -354,16 +504,16 @@ def build_refine_slide_prompt(
 {json.dumps(deck, ensure_ascii=False, indent=2)}
 
 ## 出力要件
-- 最大 {max_slides} 枚（必要なら減らしてよい）
+- 最大 {max_slides} 枚（内容に応じて調整してよい）
 - 1枚あたり 3〜6 bullet
 - bullets は空配列にしない（必ず3項目以上）
 - 文書にない情報は追加しない
-- 各スライドに最低1つの視覚要素を入れる（diagram_mermaid / table / chart / image_prompt のいずれか）
-- diagram_mermaid は必要に応じて更新してよい（文書根拠に基づく）
-- table は必要に応じて更新してよい（文書根拠に基づく）
-- image_url は参考文書に明記されている場合のみ維持/追加（推測でURLを作らない）
-- image_prompt は必要に応じて更新してよい（抽象的な表現、固有名や具体数値は避ける。アイコン/図解風を優先）
-- chart は必要に応じて更新してよい（文書根拠に基づく）。文書に明記がない場合は例示として抽象的な図・表・フローを作ってもよい
+- 視覚要素は内容に合わせて選択:
+  - diagram_mermaid: プロセス・手順がある場合
+  - table: 比較データがある場合
+  - chart: 具体的な数値がある場合（合成データ禁止）
+  - image_prompt: 物・概念を説明する場合、イメージ画像生成用の英語説明文
+- image_url は参考文書に明記されている場合のみ維持/追加
 - citations は可能な限り維持/追加（source_id, source_title, quote）
 
 ## 出力形式（JSONのみ）
@@ -550,6 +700,56 @@ def normalize_slide_deck(raw: Any) -> dict[str, Any]:
     }
 
 
+def _build_content_image_prompt(slide: dict[str, Any]) -> str:
+    """
+    Build an image generation prompt based on slide content.
+    Creates a descriptive prompt suitable for image generation APIs.
+    """
+    title = str(slide.get("title") or "").strip()
+    bullets = [str(b).strip() for b in (slide.get("bullets") or []) if str(b).strip()]
+    bullet_text = "; ".join(bullets[:4])
+    base = f"{title}. {bullet_text}".strip(". ")
+    # Clean up to make a good image prompt
+    base = _compact_text(base, 200)
+    return (
+        f"{base}. "
+        "Clean flat vector illustration, professional presentation style, "
+        "soft colors, minimal, no text overlay, no numbers, no logos, 16:9 aspect ratio."
+    )
+
+
+# Content pattern keywords for detecting appropriate visual elements
+_FLOW_KEYWORDS = re.compile(
+    r"(プロセス|ワークフロー|フロー|手順|ステップ|流れ|工程|段階|順序|process|workflow|flow|step|procedure)",
+    re.IGNORECASE,
+)
+_COMPARISON_KEYWORDS = re.compile(
+    r"(比較|一覧|仕様|チェックリスト|対比|違い|差異|対照|versus|comparison|vs\.|一覧表|リスト)",
+    re.IGNORECASE,
+)
+_NUMERIC_KEYWORDS = re.compile(
+    r"(\d+[%％]|\d+\.?\d*\s*(万|億|千|百|件|個|人|円|ドル|回|倍|年|月)|\d+[,，]\d{3})",
+)
+
+
+def _detect_visual_hint(slide: dict[str, Any]) -> Optional[str]:
+    """
+    Analyze slide content to detect if a specific visual element is appropriate.
+    Returns 'diagram', 'table', 'chart', or None.
+    """
+    text_parts = [str(slide.get("title") or "")]
+    text_parts.extend(str(b) for b in (slide.get("bullets") or []))
+    combined = " ".join(text_parts)
+
+    if _FLOW_KEYWORDS.search(combined):
+        return "diagram"
+    if _COMPARISON_KEYWORDS.search(combined):
+        return "table"
+    if _NUMERIC_KEYWORDS.search(combined):
+        return "chart"
+    return None
+
+
 def enrich_slide_deck(
     *,
     deck: dict[str, Any],
@@ -560,7 +760,8 @@ def enrich_slide_deck(
 ) -> dict[str, Any]:
     """
     Ensure deck has practical content even when model returns sparse slides.
-    Adds fallback bullets and at least one visual element per slide.
+    Adds fallback bullets when needed. Visual elements are only added when
+    content analysis suggests they are appropriate — never forced mechanically.
     """
     slides = deck.get("slides") or []
     if not isinstance(slides, list):
@@ -593,6 +794,7 @@ def enrich_slide_deck(
             slides[idx] = {"title": "Slide", "bullets": []}
             slide = slides[idx]
 
+        # Ensure bullets are not empty
         bullets = slide.get("bullets") or []
         if not isinstance(bullets, list):
             bullets = []
@@ -610,6 +812,7 @@ def enrich_slide_deck(
             )
         slide["bullets"] = bullets[:8]
 
+        # Ensure citations
         citations = slide.get("citations") or []
         if not isinstance(citations, list):
             citations = []
@@ -617,6 +820,10 @@ def enrich_slide_deck(
             citations = [fallback_citation]
         slide["citations"] = citations[:6]
 
+        # Content-driven visual elements:
+        # Add visual element based on content analysis. If no structured visual
+        # (diagram/table/chart) fits, set image_prompt so maybe_attach_generated_images()
+        # can create an image for the slide.
         has_diagram = bool(str(slide.get("diagram_mermaid") or "").strip())
         has_table = isinstance(slide.get("table"), dict) and bool(
             (slide.get("table") or {}).get("headers") or (slide.get("table") or {}).get("rows")
@@ -626,21 +833,23 @@ def enrich_slide_deck(
             str(slide.get("image_url") or "").strip()
             or str(slide.get("image_data_url") or "").strip()
         )
+        has_image_prompt = bool(str(slide.get("image_prompt") or "").strip())
 
         if not (has_diagram or has_table or has_chart or has_image):
-            if idx % 2 == 0:
+            hint = _detect_visual_hint(slide)
+            if hint == "diagram":
                 slide["diagram_mermaid"] = _build_default_mermaid(
                     str(slide.get("title") or f"Slide {idx + 1}"),
                     slide["bullets"],
                 )
-            elif idx % 3 == 1:
+            elif hint == "table":
                 slide["table"] = _build_default_table(slide["bullets"])
-            else:
+            elif hint == "chart":
                 slide["chart"] = _build_default_chart(slide["bullets"])
-            slide["image_prompt"] = (
-                "minimal flat icon illustration, clean corporate style, "
-                f"topic: {str(slide.get('title') or '').strip()}"
-            )
+            elif not has_image_prompt and idx > 0:
+                # No structured visual fits — generate an image_prompt based on content.
+                # This allows maybe_attach_generated_images() to create an image via API.
+                slide["image_prompt"] = _build_content_image_prompt(slide)
 
     deck["slides"] = slides
     if not str(deck.get("summary") or "").strip() and answer:
